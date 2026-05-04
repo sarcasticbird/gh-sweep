@@ -9,6 +9,8 @@ FORCE=false
 VERBOSE=false
 SCOPE="all" # all | local | remote
 ALL_AUTHORS=false
+ORPHANS=false
+DEPTH=1
 
 usage() {
   cat <<EOF
@@ -21,6 +23,8 @@ FLAGS
   --local     Remove worktrees + delete local branches only
   --remote    Delete remote branches only
   --all       Delete remote branches from all authors (default: yours only)
+  --orphans   Clean up local branches with no PR and no remote
+  --depth N   How many directory levels to walk for repos (default: 1)
   --dry-run   Show what would happen, don't act
   --force     Skip confirmation prompts
   --verbose   Show detail even when nothing to clean
@@ -32,6 +36,7 @@ EXAMPLES
   gh sweep --dry-run        # preview what would be cleaned
   gh sweep --local --force  # remove local worktrees/branches, no prompts
   gh sweep --remote --all   # delete all authors' remote branches
+  gh sweep --orphans        # clean up abandoned local-only branches
 EOF
 }
 
@@ -40,6 +45,8 @@ while [[ $# -gt 0 ]]; do
     --local)   SCOPE="local"; shift ;;
     --remote)  SCOPE="remote"; shift ;;
     --all)     ALL_AUTHORS=true; shift ;;
+    --orphans) ORPHANS=true; shift ;;
+    --depth)   DEPTH="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --force)   FORCE=true; shift ;;
     --verbose) VERBOSE=true; shift ;;
@@ -80,9 +87,9 @@ check_dependencies() {
 discover_repos() {
   local repos=()
 
-  for dir in */; do
-    [[ -d "${dir}.git" ]] && repos+=("$(cd "$dir" && pwd)")
-  done
+  while IFS= read -r gitdir; do
+    repos+=("$(cd "$(dirname "$gitdir")" && pwd)")
+  done < <(find . -mindepth 2 -maxdepth "$((DEPTH + 1))" -name .git -type d 2>/dev/null | sort)
 
   if [[ ${#repos[@]} -eq 0 ]]; then
     if git rev-parse --is-inside-work-tree &>/dev/null; then
@@ -122,6 +129,72 @@ get_merged_branches() {
       fi
     fi
   done < <(cd "$repo_dir" && gh poi --dry-run 2>&1)
+}
+
+get_orphan_branches() {
+  local repo_dir="$1"
+  local in_not_deleted=false
+  local current_branch=""
+  local has_pr=false
+
+  while IFS= read -r line; do
+    if [[ "$line" == "Branches not deleted" ]]; then
+      in_not_deleted=true
+      continue
+    fi
+    if [[ "$line" == "Deleted branches" ]]; then
+      in_not_deleted=false
+      continue
+    fi
+    if [[ "$in_not_deleted" == true ]]; then
+      if [[ "$line" =~ ^\ \ [^\ ] ]]; then
+        if [[ -n "$current_branch" && "$has_pr" == false ]]; then
+          echo "$current_branch"
+        fi
+        current_branch="$(echo "$line" | sed -e 's/^[* ] //' -e 's/ \[.*\]$//')"
+        has_pr=false
+        # skip current branch (marked with *) and protected branches
+        if [[ "$line" =~ ^\* ]]; then
+          current_branch=""
+        fi
+        case "$current_branch" in
+          main|master|develop) current_branch="" ;;
+        esac
+      elif [[ "$line" =~ └─ ]]; then
+        has_pr=true
+      fi
+    fi
+  done < <(cd "$repo_dir" && gh poi --dry-run 2>&1)
+
+  if [[ -n "$current_branch" && "$has_pr" == false ]]; then
+    echo "$current_branch"
+  fi
+}
+
+sweep_orphans() {
+  local repo_dir="$1"
+  shift
+  local orphans=("$@")
+  local deleted=0
+
+  for branch in "${orphans[@]}"; do
+    if [[ "$DRY_RUN" == true ]]; then
+      echo "  Would delete orphan branch: $branch (no PR, no remote)"
+      ((deleted++)) || true
+      continue
+    fi
+
+    if [[ "$FORCE" == true ]] || confirm "  Delete orphan branch $branch? (no PR, no remote)"; then
+      echo "  Deleting orphan branch: $branch"
+      git -C "$repo_dir" branch -D "$branch" 2>&1
+      ((deleted++)) || true
+    else
+      echo "  Kept: $branch"
+    fi
+  done
+
+  [[ "$deleted" -eq 0 && "$VERBOSE" == true ]] && echo "  No orphan branches to clean"
+  true
 }
 
 get_worktrees() {
@@ -287,24 +360,38 @@ main() {
       ((stale_wt_count++)) || true
     done < <(get_stale_worktrees "$repo" "${merged[@]+"${merged[@]}"}")
 
-    if [[ ${#merged[@]} -eq 0 && "$stale_wt_count" -eq 0 ]]; then
+    local orphans=()
+    if [[ "$ORPHANS" == true ]]; then
+      while IFS= read -r branch; do
+        [[ -n "$branch" ]] && orphans+=("$branch")
+      done < <(get_orphan_branches "$repo")
+    fi
+
+    if [[ ${#merged[@]} -eq 0 && "$stale_wt_count" -eq 0 && ${#orphans[@]} -eq 0 ]]; then
       [[ "$VERBOSE" == true ]] && echo "[$repo_name] Nothing to clean"
       continue
     fi
 
-    echo "[$repo_name] ${#merged[@]} merged branches, $stale_wt_count stale worktrees"
+    local summary="[$repo_name] ${#merged[@]} merged branches, $stale_wt_count stale worktrees"
+    [[ ${#orphans[@]} -gt 0 ]] && summary+=", ${#orphans[@]} orphans"
+    echo "$summary"
 
-    if [[ "$DRY_RUN" == false ]] && ! confirm "  Proceed with cleanup?"; then
-      echo "  Skipped."
-      continue
+    if [[ ${#merged[@]} -gt 0 ]]; then
+      if [[ "$DRY_RUN" == false ]] && ! confirm "  Proceed with merged branch cleanup?"; then
+        echo "  Skipped merged cleanup."
+      else
+        if [[ "$SCOPE" == "all" || "$SCOPE" == "local" ]]; then
+          sweep_local "$repo" "${merged[@]}"
+        fi
+
+        if [[ "$SCOPE" == "all" || "$SCOPE" == "remote" ]]; then
+          sweep_remote "$repo" "${branch_authors[@]+"${branch_authors[@]}"}"
+        fi
+      fi
     fi
 
-    if [[ "$SCOPE" == "all" || "$SCOPE" == "local" ]]; then
-      sweep_local "$repo" "${merged[@]}"
-    fi
-
-    if [[ "$SCOPE" == "all" || "$SCOPE" == "remote" ]]; then
-      sweep_remote "$repo" "${branch_authors[@]+"${branch_authors[@]}"}"
+    if [[ ${#orphans[@]} -gt 0 ]]; then
+      sweep_orphans "$repo" "${orphans[@]}"
     fi
 
     echo ""
