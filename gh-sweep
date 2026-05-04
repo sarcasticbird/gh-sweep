@@ -112,7 +112,7 @@ get_merged_branches() {
       continue
     fi
     if [[ "$in_deleted" == true ]]; then
-      if [[ "$line" =~ ^\ \ [a-zA-Z] ]]; then
+      if [[ "$line" =~ ^\ \ [^\ ] ]]; then
         current_branch="$(echo "$line" | sed 's/^  //')"
       elif [[ -n "$current_branch" && "$line" =~ └─ ]]; then
         local author
@@ -132,7 +132,7 @@ get_worktrees() {
     if [[ "$line" =~ ^worktree\ (.+) ]]; then
       if [[ "$is_first" == true ]]; then
         is_first=false
-        path="${BASH_REMATCH[1]}"
+        path=""
         continue
       fi
       [[ -n "$path" && -n "$branch" ]] && printf '%s\t%s\n' "$branch" "$path"
@@ -221,8 +221,8 @@ sweep_remote() {
 
   for entry in "${branch_authors[@]}"; do
     local branch author
-    branch="$(echo -e "$entry" | cut -f1)"
-    author="$(echo -e "$entry" | cut -f2)"
+    branch="${entry%%$'\t'*}"
+    author="${entry##*$'\t'}"
 
     if [[ -n "$gh_user" && "$author" != "$gh_user" ]]; then
       ((skipped_other++)) || true
@@ -274,14 +274,12 @@ main() {
     repo_name="$(basename "$repo")"
 
     echo "[$repo_name] Fetching..."
-    if [[ "$DRY_RUN" == false ]]; then
-      git -C "$repo" fetch --prune --quiet 2>&1
-    fi
+    git -C "$repo" fetch --prune --quiet 2>&1
 
     local merged=()
     local branch_authors=()
     while IFS=$'\t' read -r branch author; do
-      [[ -n "$branch" ]] && merged+=("$branch") && branch_authors+=("$branch\t$author")
+      [[ -n "$branch" ]] && merged+=("$branch") && branch_authors+=("$branch"$'\t'"$author")
     done < <(get_merged_branches "$repo")
 
     local stale_wt_count=0
