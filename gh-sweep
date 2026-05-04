@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 # Flags
 DRY_RUN=false
@@ -16,16 +16,17 @@ PR_NUMBER=""
 
 usage() {
   cat <<EOF
-gh-sweep v${VERSION} — clean up merged worktrees and branches
+gh-sweep v${VERSION} — clean up merged branches, worktrees, and PR review threads
 
 USAGE
   gh sweep [command] [flags]
 
 COMMANDS
-  local       Remove worktrees + delete local branches only
-  remote      Delete remote branches only
-  orphans     Clean up local branches with no PR and no remote
-  comments    Clean outdated review comments on a PR
+  (default)        Clean merged branches + worktrees (local and remote)
+  local            Remove worktrees + delete local branches only
+  remote           Delete remote branches only
+  orphans          Clean up local branches with no PR and no remote
+  comments <pr>    Resolve all review threads on a PR
 
 FLAGS
   --all       Delete remote branches from all authors (default: yours only)
@@ -37,12 +38,13 @@ FLAGS
   --help      Show this help
 
 EXAMPLES
-  gh sweep                  # clean current repo (or all repos in cwd)
-  gh sweep --dry-run        # preview what would be cleaned
-  gh sweep local --auto     # remove local worktrees/branches, no prompts
-  gh sweep remote --all     # delete all authors' remote branches
-  gh sweep orphans          # clean up abandoned local-only branches
-  gh sweep comments 42      # clean outdated review comments on PR #42
+  gh sweep                      # clean current repo
+  gh sweep --dry-run             # preview what would be cleaned
+  gh sweep local --auto          # remove local worktrees/branches, no prompts
+  gh sweep remote --all          # delete all authors' remote branches
+  gh sweep orphans               # clean up abandoned local-only branches
+  gh sweep comments 42           # resolve all threads on PR #42
+  gh sweep comments 42 --dry-run # preview which threads would be resolved
 EOF
 }
 
