@@ -5,7 +5,7 @@ VERSION="0.1.0"
 
 # Flags
 DRY_RUN=false
-FORCE=false
+AUTO=false
 VERBOSE=false
 SCOPE="all" # all | local | remote
 ALL_AUTHORS=false
@@ -26,7 +26,7 @@ FLAGS
   --orphans   Clean up local branches with no PR and no remote
   --depth N   How many directory levels to walk for repos (default: 1)
   --dry-run   Show what would happen, don't act
-  --force     Skip confirmation prompts
+  --auto      Skip confirmation prompts
   --verbose   Show detail even when nothing to clean
   --version   Print version
   --help      Show this help
@@ -34,7 +34,7 @@ FLAGS
 EXAMPLES
   gh sweep                  # clean current repo (or all repos in cwd)
   gh sweep --dry-run        # preview what would be cleaned
-  gh sweep --local --force  # remove local worktrees/branches, no prompts
+  gh sweep local --auto     # remove local worktrees/branches, no prompts
   gh sweep --remote --all   # delete all authors' remote branches
   gh sweep --orphans        # clean up abandoned local-only branches
 EOF
@@ -48,7 +48,7 @@ while [[ $# -gt 0 ]]; do
     --orphans) ORPHANS=true; shift ;;
     --depth)   DEPTH="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
-    --force)   FORCE=true; shift ;;
+    --auto)    AUTO=true; shift ;;
     --verbose) VERBOSE=true; shift ;;
     --version) echo "gh-sweep v${VERSION}"; exit 0 ;;
     --help|-h) usage; exit 0 ;;
@@ -68,7 +68,7 @@ check_dependencies() {
 
   if ! gh poi --help &>/dev/null; then
     echo "gh-poi is required but not installed."
-    if [[ "$FORCE" == true ]]; then
+    if [[ "$AUTO" == true ]]; then
       echo "Installing gh-poi..."
       gh extension install seachicken/gh-poi
     else
@@ -184,7 +184,7 @@ sweep_orphans() {
       continue
     fi
 
-    if [[ "$FORCE" == true ]] || confirm "  Delete orphan branch $branch? (no PR, no remote)"; then
+    if [[ "$AUTO" == true ]] || confirm "  Delete orphan branch $branch? (no PR, no remote)"; then
       echo "  Deleting orphan branch: $branch"
       git -C "$repo_dir" branch -D "$branch" 2>&1
       ((deleted++)) || true
@@ -321,7 +321,7 @@ sweep_remote() {
 
 confirm() {
   local msg="$1"
-  if [[ "$FORCE" == true ]]; then
+  if [[ "$AUTO" == true ]]; then
     return 0
   fi
   read -rp "$msg [Y/n] " answer
