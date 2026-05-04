@@ -8,6 +8,7 @@ DRY_RUN=false
 FORCE=false
 VERBOSE=false
 SCOPE="all" # all | local | remote
+ALL_AUTHORS=false
 
 usage() {
   cat <<EOF
@@ -19,6 +20,7 @@ USAGE
 FLAGS
   --local     Remove worktrees + delete local branches only
   --remote    Delete remote branches only
+  --all       Delete remote branches from all authors (default: yours only)
   --dry-run   Show what would happen, don't act
   --force     Skip confirmation prompts
   --verbose   Show detail even when nothing to clean
@@ -29,6 +31,7 @@ EXAMPLES
   gh sweep                  # clean current repo (or all repos in cwd)
   gh sweep --dry-run        # preview what would be cleaned
   gh sweep --local --force  # remove local worktrees/branches, no prompts
+  gh sweep --remote --all   # delete all authors' remote branches
 EOF
 }
 
@@ -36,6 +39,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --local)   SCOPE="local"; shift ;;
     --remote)  SCOPE="remote"; shift ;;
+    --all)     ALL_AUTHORS=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --force)   FORCE=true; shift ;;
     --verbose) VERBOSE=true; shift ;;
@@ -48,3 +52,265 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+check_dependencies() {
+  if ! command -v gh &>/dev/null; then
+    echo "error: gh (GitHub CLI) is required but not installed" >&2
+    exit 1
+  fi
+
+  if ! gh poi --help &>/dev/null; then
+    echo "gh-poi is required but not installed."
+    if [[ "$FORCE" == true ]]; then
+      echo "Installing gh-poi..."
+      gh extension install seachicken/gh-poi
+    else
+      read -rp "Install it now? (gh extension install seachicken/gh-poi) [Y/n] " answer
+      case "${answer:-Y}" in
+        [Yy]*) gh extension install seachicken/gh-poi ;;
+        *)
+          echo "gh-poi is required. Exiting." >&2
+          exit 1
+          ;;
+      esac
+    fi
+  fi
+}
+
+discover_repos() {
+  local repos=()
+
+  if git rev-parse --is-inside-work-tree &>/dev/null; then
+    repos+=("$(git rev-parse --show-toplevel)")
+  else
+    for dir in */; do
+      [[ -d "${dir}.git" ]] && repos+=("$(cd "$dir" && pwd)")
+    done
+  fi
+
+  if [[ ${#repos[@]} -eq 0 ]]; then
+    echo "No git repos found in $(pwd)" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "${repos[@]}"
+}
+
+get_merged_branches() {
+  local repo_dir="$1"
+  local in_deleted=false
+  local current_branch=""
+
+  while IFS= read -r line; do
+    if [[ "$line" == "Deleted branches" ]]; then
+      in_deleted=true
+      continue
+    fi
+    if [[ "$line" == "Branches not deleted" ]]; then
+      in_deleted=false
+      current_branch=""
+      continue
+    fi
+    if [[ "$in_deleted" == true ]]; then
+      if [[ "$line" =~ ^\ \ [a-zA-Z] ]]; then
+        current_branch="$(echo "$line" | sed 's/^  //')"
+      elif [[ -n "$current_branch" && "$line" =~ └─ ]]; then
+        local author
+        author="$(echo "$line" | awk '{print $NF}')"
+        printf '%s\t%s\n' "$current_branch" "$author"
+        current_branch=""
+      fi
+    fi
+  done < <(cd "$repo_dir" && gh poi --dry-run 2>&1)
+}
+
+get_worktrees() {
+  local repo_dir="$1"
+  local path="" branch="" is_first=true
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^worktree\ (.+) ]]; then
+      if [[ "$is_first" == true ]]; then
+        is_first=false
+        path="${BASH_REMATCH[1]}"
+        continue
+      fi
+      [[ -n "$path" && -n "$branch" ]] && printf '%s\t%s\n' "$branch" "$path"
+      path="${BASH_REMATCH[1]}"
+      branch=""
+    elif [[ "$line" =~ ^branch\ refs/heads/(.+) ]]; then
+      branch="${BASH_REMATCH[1]}"
+    fi
+  done < <(cd "$repo_dir" && git worktree list --porcelain 2>/dev/null)
+
+  [[ -n "$path" && -n "$branch" ]] && printf '%s\t%s\n' "$branch" "$path"
+}
+
+worktree_is_dirty() {
+  local wt_path="$1"
+  [[ -n "$(git -C "$wt_path" status --porcelain 2>/dev/null)" ]]
+}
+
+get_stale_worktrees() {
+  local repo_dir="$1"
+  shift
+  local merged_branches=("$@")
+
+  while IFS=$'\t' read -r wt_branch wt_path; do
+    for merged in "${merged_branches[@]+"${merged_branches[@]}"}"; do
+      if [[ "$wt_branch" == "$merged" ]]; then
+        printf '%s\t%s\n' "$wt_branch" "$wt_path"
+        break
+      fi
+    done
+  done < <(get_worktrees "$repo_dir")
+}
+
+sweep_local() {
+  local repo_dir="$1"
+  shift
+  local merged_branches=("$@")
+  local wt_removed=0
+  local skipped=()
+
+  while IFS=$'\t' read -r wt_branch wt_path; do
+    if worktree_is_dirty "$wt_path"; then
+      skipped+=("$wt_branch (dirty: $wt_path)")
+      continue
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+      echo "  Would remove worktree: $wt_path ($wt_branch)"
+    else
+      echo "  Removing worktree: $wt_path ($wt_branch)"
+      git -C "$repo_dir" worktree remove "$wt_path" 2>&1
+    fi
+    ((wt_removed++)) || true
+  done < <(get_stale_worktrees "$repo_dir" "${merged_branches[@]}")
+
+  if [[ "$DRY_RUN" == true ]]; then
+    local count
+    count=$(printf '%s\n' "${merged_branches[@]}" | wc -l | tr -d ' ')
+    echo "  Would delete $count local branches via gh poi"
+  else
+    (cd "$repo_dir" && gh poi --state merged 2>&1) | while IFS= read -r line; do
+      echo "  $line"
+    done
+    git -C "$repo_dir" worktree prune 2>/dev/null
+  fi
+
+  for s in "${skipped[@]+"${skipped[@]}"}"; do
+    echo "  ⚠ Skipped: $s"
+  done
+}
+
+sweep_remote() {
+  local repo_dir="$1"
+  shift
+  local branch_authors=("$@")
+  local deleted=0
+  local skipped_other=0
+  local gh_user=""
+
+  if [[ "$ALL_AUTHORS" == false ]]; then
+    gh_user="$(gh api user --jq '.login' 2>/dev/null)" || true
+    if [[ -z "$gh_user" ]]; then
+      echo "  ⚠ Could not determine GitHub user, cleaning all remote branches"
+    fi
+  fi
+
+  for entry in "${branch_authors[@]}"; do
+    local branch author
+    branch="$(echo -e "$entry" | cut -f1)"
+    author="$(echo -e "$entry" | cut -f2)"
+
+    if [[ -n "$gh_user" && "$author" != "$gh_user" ]]; then
+      ((skipped_other++)) || true
+      [[ "$VERBOSE" == true ]] && echo "  Skipped remote: origin/$branch (author: $author)"
+      continue
+    fi
+
+    if git -C "$repo_dir" ls-remote --exit-code --heads origin "$branch" &>/dev/null; then
+      if [[ "$DRY_RUN" == true ]]; then
+        echo "  Would delete remote branch: origin/$branch"
+      else
+        echo "  Deleting remote branch: origin/$branch"
+        git -C "$repo_dir" push origin --delete "$branch" 2>&1
+      fi
+      ((deleted++)) || true
+    fi
+  done
+
+  [[ "$deleted" -eq 0 && "$VERBOSE" == true ]] && echo "  No remote branches to clean"
+  [[ "$skipped_other" -gt 0 ]] && echo "  Skipped $skipped_other remote branches by other authors (use --all to include)"
+  true
+}
+
+confirm() {
+  local msg="$1"
+  if [[ "$FORCE" == true ]]; then
+    return 0
+  fi
+  read -rp "$msg [Y/n] " answer
+  case "${answer:-Y}" in
+    [Yy]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+main() {
+  check_dependencies
+
+  local repos=()
+  while IFS= read -r repo; do
+    repos+=("$repo")
+  done < <(discover_repos)
+
+  [[ "$DRY_RUN" == true ]] && echo "== DRY RUN =="
+  echo ""
+
+  for repo in "${repos[@]}"; do
+    local repo_name
+    repo_name="$(basename "$repo")"
+
+    echo "[$repo_name] Fetching..."
+    if [[ "$DRY_RUN" == false ]]; then
+      git -C "$repo" fetch --prune --quiet 2>&1
+    fi
+
+    local merged=()
+    local branch_authors=()
+    while IFS=$'\t' read -r branch author; do
+      [[ -n "$branch" ]] && merged+=("$branch") && branch_authors+=("$branch\t$author")
+    done < <(get_merged_branches "$repo")
+
+    local stale_wt_count=0
+    while IFS=$'\t' read -r _ _; do
+      ((stale_wt_count++)) || true
+    done < <(get_stale_worktrees "$repo" "${merged[@]+"${merged[@]}"}")
+
+    if [[ ${#merged[@]} -eq 0 && "$stale_wt_count" -eq 0 ]]; then
+      [[ "$VERBOSE" == true ]] && echo "[$repo_name] Nothing to clean"
+      continue
+    fi
+
+    echo "[$repo_name] ${#merged[@]} merged branches, $stale_wt_count stale worktrees"
+
+    if [[ "$DRY_RUN" == false ]] && ! confirm "  Proceed with cleanup?"; then
+      echo "  Skipped."
+      continue
+    fi
+
+    if [[ "$SCOPE" == "all" || "$SCOPE" == "local" ]]; then
+      sweep_local "$repo" "${merged[@]}"
+    fi
+
+    if [[ "$SCOPE" == "all" || "$SCOPE" == "remote" ]]; then
+      sweep_remote "$repo" "${branch_authors[@]+"${branch_authors[@]}"}"
+    fi
+
+    echo ""
+  done
+}
+
+main
