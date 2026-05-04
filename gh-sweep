@@ -357,6 +357,70 @@ confirm() {
   esac
 }
 
+sweep_comments() {
+  local pr_number="$1"
+
+  local repo_info
+  repo_info="$(gh repo view --json owner,name --jq '.owner.login + "/" + .name')" || {
+    echo "error: not in a GitHub repository" >&2
+    exit 1
+  }
+  local owner="${repo_info%%/*}"
+  local repo="${repo_info##*/}"
+
+  echo "Fetching review threads for ${owner}/${repo}#${pr_number}..."
+
+  local thread_ids
+  thread_ids=$(gh api graphql -f query='
+    query($owner:String!,$repo:String!,$pr:Int!) {
+      repository(owner:$owner,name:$repo) {
+        pullRequest(number:$pr) {
+          reviewThreads(first:100) {
+            nodes { id isResolved }
+          }
+        }
+      }
+    }' -f owner="$owner" -f repo="$repo" -F pr="$pr_number" \
+    --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | .id')
+
+  local count=0
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    ((count++)) || true
+  done <<< "$thread_ids"
+
+  if [[ "$count" -eq 0 ]]; then
+    echo "No unresolved review threads on PR #${pr_number}"
+    return 0
+  fi
+
+  echo "Found $count unresolved review threads"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "Would resolve $count threads"
+    return 0
+  fi
+
+  if [[ "$AUTO" != true ]] && ! confirm "Resolve all $count threads?"; then
+    echo "Skipped."
+    return 0
+  fi
+
+  local resolved=0
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    gh api graphql -f query='
+      mutation($id:ID!) {
+        resolveReviewThread(input:{threadId:$id}) {
+          thread { id }
+        }
+      }' -f id="$id" --silent
+    ((resolved++)) || true
+  done <<< "$thread_ids"
+
+  echo "Resolved $resolved review threads on PR #${pr_number}"
+}
+
 sweep_branches() {
   check_dependencies
 
