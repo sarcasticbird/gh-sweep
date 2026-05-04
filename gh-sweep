@@ -57,8 +57,9 @@ if [[ $# -gt 0 ]]; then
     comments)
       COMMAND="comments"
       shift
-      PR_NUMBER="${1:-}"
-      [[ -n "$PR_NUMBER" ]] && shift
+      if [[ -n "${1:-}" && "$1" != -* ]]; then
+        PR_NUMBER="$1"; shift
+      fi
       ;;
     -*) ;;  # flag, not subcommand — leave for flag parsing
     *)
@@ -74,7 +75,12 @@ fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --all)     ALL_AUTHORS=true; shift ;;
-    --depth)   DEPTH="$2"; shift 2 ;;
+    --depth)
+      if [[ -z "${2:-}" || ! "${2:-}" =~ ^[0-9]+$ ]]; then
+        echo "error: --depth requires a numeric argument" >&2
+        exit 1
+      fi
+      DEPTH="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --auto)    AUTO=true; shift ;;
     --verbose) VERBOSE=true; shift ;;
@@ -372,6 +378,25 @@ sweep_comments() {
 
   echo "Fetching review threads for ${owner}/${repo}#${pr_number}..."
 
+  local pr_check
+  pr_check=$(gh api graphql -f query='
+    query($owner:String!,$repo:String!,$pr:Int!) {
+      repository(owner:$owner,name:$repo) {
+        pullRequest(number:$pr) {
+          number
+        }
+      }
+    }' -f owner="$owner" -f repo="$repo" -F pr="$pr_number" \
+    --jq '.data.repository.pullRequest') || {
+    echo "error: failed to query PR #${pr_number}" >&2
+    exit 1
+  }
+
+  if [[ "$pr_check" == "null" ]]; then
+    echo "error: PR #${pr_number} not found in ${owner}/${repo}" >&2
+    exit 1
+  fi
+
   local thread_ids
   thread_ids=$(gh api graphql -f query='
     query($owner:String!,$repo:String!,$pr:Int!) {
@@ -409,18 +434,25 @@ sweep_comments() {
   fi
 
   local resolved=0
+  local failed=0
   while IFS= read -r id; do
     [[ -z "$id" ]] && continue
-    gh api graphql -f query='
+    if gh api graphql -f query='
       mutation($id:ID!) {
         resolveReviewThread(input:{threadId:$id}) {
           thread { id }
         }
-      }' -f id="$id" --silent
-    ((resolved++)) || true
+      }' -f id="$id" > /dev/null 2>&1; then
+      ((resolved++)) || true
+    else
+      ((failed++)) || true
+      echo "  warning: failed to resolve thread $id" >&2
+    fi
   done <<< "$thread_ids"
 
   echo "Resolved $resolved review threads on PR #${pr_number}"
+  [[ "$failed" -gt 0 ]] && echo "  $failed threads failed to resolve" >&2
+  true
 }
 
 sweep_branches() {
