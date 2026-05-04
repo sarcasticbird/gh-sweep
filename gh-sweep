@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# Flags
+DRY_RUN=false
+FORCE=false
+VERBOSE=false
+SCOPE="all" # all | local | remote
+
+usage() {
+  cat <<EOF
+gh-sweep v${VERSION} — clean up merged worktrees and branches
+
+USAGE
+  gh sweep [flags]
+
+FLAGS
+  --local     Remove worktrees + delete local branches only
+  --remote    Delete remote branches only
+  --dry-run   Show what would happen, don't act
+  --force     Skip confirmation prompts
+  --verbose   Show detail even when nothing to clean
+  --version   Print version
+  --help      Show this help
+
+EXAMPLES
+  gh sweep                  # clean current repo (or all repos in cwd)
+  gh sweep --dry-run        # preview what would be cleaned
+  gh sweep --local --force  # remove local worktrees/branches, no prompts
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --local)   SCOPE="local"; shift ;;
+    --remote)  SCOPE="remote"; shift ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    --force)   FORCE=true; shift ;;
+    --verbose) VERBOSE=true; shift ;;
+    --version) echo "gh-sweep v${VERSION}"; exit 0 ;;
+    --help|-h) usage; exit 0 ;;
+    *)
+      echo "Unknown flag: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
