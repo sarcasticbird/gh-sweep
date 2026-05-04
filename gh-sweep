@@ -80,17 +80,17 @@ check_dependencies() {
 discover_repos() {
   local repos=()
 
-  if git rev-parse --is-inside-work-tree &>/dev/null; then
-    repos+=("$(git rev-parse --show-toplevel)")
-  else
-    for dir in */; do
-      [[ -d "${dir}.git" ]] && repos+=("$(cd "$dir" && pwd)")
-    done
-  fi
+  for dir in */; do
+    [[ -d "${dir}.git" ]] && repos+=("$(cd "$dir" && pwd)")
+  done
 
   if [[ ${#repos[@]} -eq 0 ]]; then
-    echo "No git repos found in $(pwd)" >&2
-    exit 1
+    if git rev-parse --is-inside-work-tree &>/dev/null; then
+      repos+=("$(git rev-parse --show-toplevel)")
+    else
+      echo "No git repos found in $(pwd)" >&2
+      exit 1
+    fi
   fi
 
   printf '%s\n' "${repos[@]}"
