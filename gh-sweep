@@ -1,54 +1,96 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 # Flags
 DRY_RUN=false
-FORCE=false
+AUTO=false
 VERBOSE=false
-SCOPE="all" # all | local | remote
-ALL_AUTHORS=false
-ORPHANS=false
+ALL=false
 DEPTH=1
+
+# Subcommand
+COMMAND=""
+PR_NUMBER=""
 
 usage() {
   cat <<EOF
-gh-sweep v${VERSION} — clean up merged worktrees and branches
+gh-sweep v${VERSION} — clean up merged branches, worktrees, and more
 
 USAGE
-  gh sweep [flags]
+  gh sweep [command] [flags]
+
+COMMANDS
+  (default)        Clean merged branches + worktrees (local and remote)
+  local            Remove worktrees + delete local branches only
+  remote           Delete remote branches only
+  orphans          Clean up local branches with no PR and no remote
+  comments <pr>    Resolve all review threads on a PR
+  caches           Delete Actions caches for branches that no longer exist
+  runs             Delete successful workflow runs (--all for all terminal)
 
 FLAGS
-  --local     Remove worktrees + delete local branches only
-  --remote    Delete remote branches only
-  --all       Delete remote branches from all authors (default: yours only)
-  --orphans   Clean up local branches with no PR and no remote
+  --all       Broaden scope (branches: all authors; runs: all terminal statuses)
   --depth N   How many directory levels to walk for repos (default: 1)
   --dry-run   Show what would happen, don't act
-  --force     Skip confirmation prompts
+  --auto      Skip confirmation prompts
   --verbose   Show detail even when nothing to clean
   --version   Print version
   --help      Show this help
 
 EXAMPLES
-  gh sweep                  # clean current repo (or all repos in cwd)
-  gh sweep --dry-run        # preview what would be cleaned
-  gh sweep --local --force  # remove local worktrees/branches, no prompts
-  gh sweep --remote --all   # delete all authors' remote branches
-  gh sweep --orphans        # clean up abandoned local-only branches
+  gh sweep                      # clean current repo
+  gh sweep --dry-run             # preview what would be cleaned
+  gh sweep local --auto          # remove local worktrees/branches, no prompts
+  gh sweep remote --all          # delete all authors' remote branches
+  gh sweep orphans               # clean up abandoned local-only branches
+  gh sweep comments 42           # resolve all threads on PR #42
+  gh sweep comments 42 --dry-run # preview which threads would be resolved
+  gh sweep caches                # delete caches for dead branches
+  gh sweep caches --dry-run      # preview which caches would be deleted
+  gh sweep runs                  # delete completed workflow runs
+  gh sweep runs --all            # delete runs of all statuses (not in_progress)
 EOF
 }
 
+# Parse subcommand (first positional argument)
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    local)    COMMAND="local"; shift ;;
+    remote)   COMMAND="remote"; shift ;;
+    orphans)  COMMAND="orphans"; shift ;;
+    comments)
+      COMMAND="comments"
+      shift
+      if [[ -n "${1:-}" && "$1" != -* ]]; then
+        PR_NUMBER="$1"; shift
+      fi
+      ;;
+    caches)   COMMAND="caches"; shift ;;
+    runs)     COMMAND="runs"; shift ;;
+    -*) ;;  # flag, not subcommand — leave for flag parsing
+    *)
+      echo "Unknown command: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+fi
+[[ -z "$COMMAND" ]] && COMMAND="branches"
+
+# Parse flags
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --local)   SCOPE="local"; shift ;;
-    --remote)  SCOPE="remote"; shift ;;
-    --all)     ALL_AUTHORS=true; shift ;;
-    --orphans) ORPHANS=true; shift ;;
-    --depth)   DEPTH="$2"; shift 2 ;;
+    --all)     ALL=true; shift ;;
+    --depth)
+      if [[ -z "${2:-}" || ! "${2:-}" =~ ^[0-9]+$ ]]; then
+        echo "error: --depth requires a numeric argument" >&2
+        exit 1
+      fi
+      DEPTH="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
-    --force)   FORCE=true; shift ;;
+    --auto)    AUTO=true; shift ;;
     --verbose) VERBOSE=true; shift ;;
     --version) echo "gh-sweep v${VERSION}"; exit 0 ;;
     --help|-h) usage; exit 0 ;;
@@ -68,7 +110,7 @@ check_dependencies() {
 
   if ! gh poi --help &>/dev/null; then
     echo "gh-poi is required but not installed."
-    if [[ "$FORCE" == true ]]; then
+    if [[ "$AUTO" == true ]]; then
       echo "Installing gh-poi..."
       gh extension install seachicken/gh-poi
     else
@@ -184,7 +226,7 @@ sweep_orphans() {
       continue
     fi
 
-    if [[ "$FORCE" == true ]] || confirm "  Delete orphan branch $branch? (no PR, no remote)"; then
+    if [[ "$AUTO" == true ]] || confirm "  Delete orphan branch $branch? (no PR, no remote)"; then
       echo "  Deleting orphan branch: $branch"
       git -C "$repo_dir" branch -D "$branch" 2>&1
       ((deleted++)) || true
@@ -285,7 +327,7 @@ sweep_remote() {
   local skipped_other=0
   local gh_user=""
 
-  if [[ "$ALL_AUTHORS" == false ]]; then
+  if [[ "$ALL" == false ]]; then
     gh_user="$(gh api user --jq '.login' 2>/dev/null)" || true
     if [[ -z "$gh_user" ]]; then
       echo "  ⚠ Could not determine GitHub user, cleaning all remote branches"
@@ -321,7 +363,7 @@ sweep_remote() {
 
 confirm() {
   local msg="$1"
-  if [[ "$FORCE" == true ]]; then
+  if [[ "$AUTO" == true ]]; then
     return 0
   fi
   read -rp "$msg [Y/n] " answer
@@ -331,7 +373,265 @@ confirm() {
   esac
 }
 
-main() {
+sweep_comments() {
+  local pr_number="$1"
+
+  local repo_info
+  repo_info="$(gh repo view --json owner,name --jq '.owner.login + "/" + .name')" || {
+    echo "error: not in a GitHub repository" >&2
+    exit 1
+  }
+  local owner="${repo_info%%/*}"
+  local repo="${repo_info##*/}"
+
+  echo "Fetching review threads for ${owner}/${repo}#${pr_number}..."
+
+  local pr_check
+  pr_check=$(gh api graphql -f query='
+    query($owner:String!,$repo:String!,$pr:Int!) {
+      repository(owner:$owner,name:$repo) {
+        pullRequest(number:$pr) {
+          number
+        }
+      }
+    }' -f owner="$owner" -f repo="$repo" -F pr="$pr_number" \
+    --jq '.data.repository.pullRequest') || {
+    echo "error: failed to query PR #${pr_number}" >&2
+    exit 1
+  }
+
+  if [[ "$pr_check" == "null" ]]; then
+    echo "error: PR #${pr_number} not found in ${owner}/${repo}" >&2
+    exit 1
+  fi
+
+  local thread_ids
+  thread_ids=$(gh api graphql -f query='
+    query($owner:String!,$repo:String!,$pr:Int!) {
+      repository(owner:$owner,name:$repo) {
+        pullRequest(number:$pr) {
+          reviewThreads(first:100) {
+            nodes { id isResolved }
+          }
+        }
+      }
+    }' -f owner="$owner" -f repo="$repo" -F pr="$pr_number" \
+    --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | .id')
+
+  local count=0
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    ((count++)) || true
+  done <<< "$thread_ids"
+
+  if [[ "$count" -eq 0 ]]; then
+    echo "No unresolved review threads on PR #${pr_number}"
+    return 0
+  fi
+
+  echo "Found $count unresolved review threads"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "Would resolve $count threads"
+    return 0
+  fi
+
+  if [[ "$AUTO" != true ]] && ! confirm "Resolve all $count threads?"; then
+    echo "Skipped."
+    return 0
+  fi
+
+  local resolved=0
+  local failed=0
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    if gh api graphql -f query='
+      mutation($id:ID!) {
+        resolveReviewThread(input:{threadId:$id}) {
+          thread { id }
+        }
+      }' -f id="$id" > /dev/null 2>&1; then
+      ((resolved++)) || true
+    else
+      ((failed++)) || true
+      echo "  warning: failed to resolve thread $id" >&2
+    fi
+  done <<< "$thread_ids"
+
+  echo "Resolved $resolved review threads on PR #${pr_number}"
+  [[ "$failed" -gt 0 ]] && echo "  $failed threads failed to resolve" >&2
+  true
+}
+
+sweep_caches() {
+  local repo_info
+  repo_info="$(gh repo view --json owner,name --jq '.owner.login + "/" + .name')" || {
+    echo "error: not in a GitHub repository" >&2
+    exit 1
+  }
+  local owner="${repo_info%%/*}"
+  local repo="${repo_info##*/}"
+
+  echo "Fetching Actions caches for ${owner}/${repo}..."
+
+  local remote_branches
+  remote_branches="$(git ls-remote --heads origin 2>/dev/null | awk '{print $2}' | sed 's|refs/heads/||')"
+
+  local cache_json
+  cache_json="$(gh api "repos/${owner}/${repo}/actions/caches" --paginate --jq '.actions_caches[] | [.id, .ref, .key, .size_in_bytes] | @tsv')" || {
+    echo "error: failed to fetch caches" >&2
+    exit 1
+  }
+
+  if [[ -z "$cache_json" ]]; then
+    echo "No Actions caches found"
+    return 0
+  fi
+
+  local stale_ids=()
+  local stale_refs=()
+  local total_bytes=0
+  local total_caches=0
+  local stale_bytes=0
+
+  while IFS=$'\t' read -r cache_id cache_ref cache_key cache_size; do
+    [[ -z "$cache_id" ]] && continue
+    ((total_caches++)) || true
+    ((total_bytes += cache_size)) || true
+
+    local branch="${cache_ref#refs/heads/}"
+    local is_stale=false
+
+    if [[ "$cache_ref" == refs/pull/* ]]; then
+      local pr_num="${cache_ref#refs/pull/}"
+      pr_num="${pr_num%%/*}"
+      local pr_state
+      pr_state="$(gh api "repos/${owner}/${repo}/pulls/${pr_num}" --jq '.state' 2>/dev/null)" || pr_state="unknown"
+      [[ "$pr_state" != "open" ]] && is_stale=true
+    elif ! echo "$remote_branches" | grep -Fqx "$branch"; then
+      is_stale=true
+    fi
+
+    if [[ "$is_stale" == true ]]; then
+      stale_ids+=("$cache_id")
+      stale_refs+=("$cache_ref")
+      ((stale_bytes += cache_size)) || true
+      [[ "$VERBOSE" == true ]] && echo "  Stale: $cache_ref ($cache_key)"
+    fi
+  done <<< "$cache_json"
+
+  local stale_count=${#stale_ids[@]}
+  local stale_mb=$(( stale_bytes / 1048576 ))
+
+  if [[ "$stale_count" -eq 0 ]]; then
+    echo "No stale caches found ($total_caches caches, all refs still active)"
+    return 0
+  fi
+
+  echo "Found $stale_count stale caches (${stale_mb}MB) from dead branches out of $total_caches total"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    local seen_refs=()
+    for ref in "${stale_refs[@]}"; do
+      local already=false
+      for s in "${seen_refs[@]+"${seen_refs[@]}"}"; do
+        [[ "$s" == "$ref" ]] && already=true && break
+      done
+      [[ "$already" == false ]] && seen_refs+=("$ref") && echo "  Would delete caches for: $ref"
+    done
+    return 0
+  fi
+
+  if [[ "$AUTO" != true ]] && ! confirm "Delete $stale_count stale caches (${stale_mb}MB)?"; then
+    echo "Skipped."
+    return 0
+  fi
+
+  local deleted=0
+  local failed=0
+  for cache_id in "${stale_ids[@]}"; do
+    if gh api --method DELETE "repos/${owner}/${repo}/actions/caches/${cache_id}" > /dev/null 2>&1; then
+      ((deleted++)) || true
+    else
+      ((failed++)) || true
+    fi
+  done
+
+  echo "Deleted $deleted stale caches (${stale_mb}MB)"
+  [[ "$failed" -gt 0 ]] && echo "  $failed caches failed to delete" >&2
+  true
+}
+
+sweep_runs() {
+  local repo_info
+  repo_info="$(gh repo view --json owner,name --jq '.owner.login + "/" + .name')" || {
+    echo "error: not in a GitHub repository" >&2
+    exit 1
+  }
+  local owner="${repo_info%%/*}"
+  local repo="${repo_info##*/}"
+
+  echo "Fetching workflow runs for ${owner}/${repo}..."
+
+  local runs
+  runs="$(gh api "repos/${owner}/${repo}/actions/runs?status=completed&per_page=100" \
+    --paginate --jq '.workflow_runs[] | [.id, .name, .head_branch, .conclusion, .created_at] | @tsv' 2>/dev/null)" || {
+    echo "error: failed to fetch workflow runs" >&2
+    exit 1
+  }
+
+  local run_ids=()
+  local run_info=()
+  while IFS=$'\t' read -r run_id run_name run_branch run_conclusion run_created; do
+    [[ -z "$run_id" ]] && continue
+    if [[ "$ALL" != true && "$run_conclusion" != "success" ]]; then
+      continue
+    fi
+    run_ids+=("$run_id")
+    run_info+=("${run_name} (${run_branch}, ${run_conclusion}, ${run_created})")
+  done <<< "$runs"
+
+  local count=${#run_ids[@]}
+
+  if [[ "$count" -eq 0 ]]; then
+    echo "No workflow runs to clean up"
+    return 0
+  fi
+
+  echo "Found $count workflow runs to delete"
+
+  if [[ "$VERBOSE" == true ]]; then
+    for info in "${run_info[@]}"; do
+      echo "  $info"
+    done
+  fi
+
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "Would delete $count workflow runs"
+    return 0
+  fi
+
+  if [[ "$AUTO" != true ]] && ! confirm "Delete $count workflow runs?"; then
+    echo "Skipped."
+    return 0
+  fi
+
+  local deleted=0
+  local failed=0
+  for run_id in "${run_ids[@]}"; do
+    if gh api --method DELETE "repos/${owner}/${repo}/actions/runs/${run_id}" > /dev/null 2>&1; then
+      ((deleted++)) || true
+    else
+      ((failed++)) || true
+    fi
+  done
+
+  echo "Deleted $deleted workflow runs"
+  [[ "$failed" -gt 0 ]] && echo "  $failed runs failed to delete" >&2
+  true
+}
+
+sweep_branches() {
   check_dependencies
 
   local repos=()
@@ -361,41 +661,68 @@ main() {
     done < <(get_stale_worktrees "$repo" "${merged[@]+"${merged[@]}"}")
 
     local orphans=()
-    if [[ "$ORPHANS" == true ]]; then
+    if [[ "$COMMAND" == "orphans" ]]; then
       while IFS= read -r branch; do
         [[ -n "$branch" ]] && orphans+=("$branch")
       done < <(get_orphan_branches "$repo")
     fi
 
-    if [[ ${#merged[@]} -eq 0 && "$stale_wt_count" -eq 0 && ${#orphans[@]} -eq 0 ]]; then
+    if [[ "$COMMAND" == "orphans" ]]; then
+      if [[ ${#orphans[@]} -eq 0 ]]; then
+        [[ "$VERBOSE" == true ]] && echo "[$repo_name] No orphan branches found"
+        continue
+      fi
+      echo "[$repo_name] ${#orphans[@]} orphan branches"
+      sweep_orphans "$repo" "${orphans[@]}"
+      echo ""
+      continue
+    fi
+
+    if [[ ${#merged[@]} -eq 0 && "$stale_wt_count" -eq 0 ]]; then
       [[ "$VERBOSE" == true ]] && echo "[$repo_name] Nothing to clean"
       continue
     fi
 
-    local summary="[$repo_name] ${#merged[@]} merged branches, $stale_wt_count stale worktrees"
-    [[ ${#orphans[@]} -gt 0 ]] && summary+=", ${#orphans[@]} orphans"
-    echo "$summary"
+    echo "[$repo_name] ${#merged[@]} merged branches, $stale_wt_count stale worktrees"
 
     if [[ ${#merged[@]} -gt 0 ]]; then
       if [[ "$DRY_RUN" == false ]] && ! confirm "  Proceed with merged branch cleanup?"; then
         echo "  Skipped merged cleanup."
       else
-        if [[ "$SCOPE" == "all" || "$SCOPE" == "local" ]]; then
+        if [[ "$COMMAND" == "branches" || "$COMMAND" == "local" ]]; then
           sweep_local "$repo" "${merged[@]}"
         fi
 
-        if [[ "$SCOPE" == "all" || "$SCOPE" == "remote" ]]; then
+        if [[ "$COMMAND" == "branches" || "$COMMAND" == "remote" ]]; then
           sweep_remote "$repo" "${branch_authors[@]+"${branch_authors[@]}"}"
         fi
       fi
     fi
 
-    if [[ ${#orphans[@]} -gt 0 ]]; then
-      sweep_orphans "$repo" "${orphans[@]}"
-    fi
-
     echo ""
   done
+}
+
+main() {
+  case "$COMMAND" in
+    comments)
+      if [[ -z "$PR_NUMBER" || ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+        echo "error: gh sweep comments requires a PR number" >&2
+        echo "usage: gh sweep comments <pr-number>" >&2
+        exit 1
+      fi
+      sweep_comments "$PR_NUMBER"
+      ;;
+    caches)
+      sweep_caches
+      ;;
+    runs)
+      sweep_runs
+      ;;
+    local|remote|orphans|branches)
+      sweep_branches
+      ;;
+  esac
 }
 
 main
