@@ -31,7 +31,7 @@ COMMANDS
   runs             Delete successful workflow runs (--all for all terminal)
 
 FLAGS
-  --all       Delete remote branches from all authors (default: yours only)
+  --all       Broaden scope (branches: all authors; runs: all terminal statuses)
   --depth N   How many directory levels to walk for repos (default: 1)
   --dry-run   Show what would happen, don't act
   --auto      Skip confirmation prompts
