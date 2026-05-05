@@ -508,7 +508,7 @@ sweep_caches() {
       local pr_state
       pr_state="$(gh api "repos/${owner}/${repo}/pulls/${pr_num}" --jq '.state' 2>/dev/null)" || pr_state="unknown"
       [[ "$pr_state" != "open" ]] && is_stale=true
-    elif ! echo "$remote_branches" | grep -qx "$branch"; then
+    elif ! echo "$remote_branches" | grep -Fqx "$branch"; then
       is_stale=true
     fi
 
@@ -575,7 +575,7 @@ sweep_runs() {
 
   local statuses=("completed")
   if [[ "$ALL_AUTHORS" == true ]]; then
-    statuses=("completed" "cancelled" "failure" "success" "skipped" "timed_out" "stale" "startup_failure" "neutral")
+    statuses=("cancelled" "failure" "success" "skipped" "timed_out" "stale" "startup_failure" "neutral")
   fi
 
   local run_ids=()
