@@ -28,7 +28,7 @@ gh sweep [command] [flags]
 | `orphans` | Clean up local branches with no PR and no remote tracking |
 | `comments <pr>` | Resolve all unresolved review threads on a PR |
 | `caches` | Delete Actions caches for branches that no longer exist |
-| `runs` | Delete completed workflow runs |
+| `runs` | Delete successful workflow runs (`--all` for all terminal statuses) |
 
 ### Flags
 
@@ -121,7 +121,7 @@ Deletes GitHub Actions caches associated with branches that no longer exist on t
 
 ### `runs`
 
-Deletes completed workflow runs from the repository. By default only targets runs with `completed` status. Use `--all` to include all terminal statuses (cancelled, failure, skipped, timed_out, etc.). Never deletes in-progress, queued, or waiting runs.
+Deletes workflow runs from the repository. By default only deletes successful runs. Use `--all` to include all terminal statuses (cancelled, failure, skipped, timed_out, etc.). Never deletes in-progress, queued, or waiting runs.
 
 - Use `--verbose` to see individual run details before deletion
 

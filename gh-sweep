@@ -7,7 +7,7 @@ VERSION="0.2.0"
 DRY_RUN=false
 AUTO=false
 VERBOSE=false
-ALL_AUTHORS=false
+ALL=false
 DEPTH=1
 
 # Subcommand
@@ -28,7 +28,7 @@ COMMANDS
   orphans          Clean up local branches with no PR and no remote
   comments <pr>    Resolve all review threads on a PR
   caches           Delete Actions caches for branches that no longer exist
-  runs             Delete completed workflow runs
+  runs             Delete successful workflow runs (--all for all terminal)
 
 FLAGS
   --all       Delete remote branches from all authors (default: yours only)
@@ -82,7 +82,7 @@ fi
 # Parse flags
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --all)     ALL_AUTHORS=true; shift ;;
+    --all)     ALL=true; shift ;;
     --depth)
       if [[ -z "${2:-}" || ! "${2:-}" =~ ^[0-9]+$ ]]; then
         echo "error: --depth requires a numeric argument" >&2
@@ -327,7 +327,7 @@ sweep_remote() {
   local skipped_other=0
   local gh_user=""
 
-  if [[ "$ALL_AUTHORS" == false ]]; then
+  if [[ "$ALL" == false ]]; then
     gh_user="$(gh api user --jq '.login' 2>/dev/null)" || true
     if [[ -z "$gh_user" ]]; then
       echo "  ⚠ Could not determine GitHub user, cleaning all remote branches"
@@ -573,25 +573,23 @@ sweep_runs() {
 
   echo "Fetching workflow runs for ${owner}/${repo}..."
 
-  local statuses=("completed")
-  if [[ "$ALL_AUTHORS" == true ]]; then
-    statuses=("cancelled" "failure" "success" "skipped" "timed_out" "stale" "startup_failure" "neutral")
-  fi
+  local runs
+  runs="$(gh api "repos/${owner}/${repo}/actions/runs?status=completed&per_page=100" \
+    --paginate --jq '.workflow_runs[] | [.id, .name, .head_branch, .conclusion, .created_at] | @tsv' 2>/dev/null)" || {
+    echo "error: failed to fetch workflow runs" >&2
+    exit 1
+  }
 
   local run_ids=()
   local run_info=()
-  for status in "${statuses[@]}"; do
-    local runs
-    runs="$(gh api "repos/${owner}/${repo}/actions/runs?status=${status}&per_page=100" \
-      --paginate --jq '.workflow_runs[] | [.id, .name, .head_branch, .status, .conclusion, .created_at] | @tsv' 2>/dev/null)" || continue
-
-    while IFS=$'\t' read -r run_id run_name run_branch run_status run_conclusion run_created; do
-      [[ -z "$run_id" ]] && continue
-      [[ "$run_status" == "in_progress" || "$run_status" == "queued" || "$run_status" == "waiting" ]] && continue
-      run_ids+=("$run_id")
-      run_info+=("${run_name} (${run_branch}, ${run_conclusion:-${run_status}}, ${run_created})")
-    done <<< "$runs"
-  done
+  while IFS=$'\t' read -r run_id run_name run_branch run_conclusion run_created; do
+    [[ -z "$run_id" ]] && continue
+    if [[ "$ALL" != true && "$run_conclusion" != "success" ]]; then
+      continue
+    fi
+    run_ids+=("$run_id")
+    run_info+=("${run_name} (${run_branch}, ${run_conclusion}, ${run_created})")
+  done <<< "$runs"
 
   local count=${#run_ids[@]}
 
