@@ -8,7 +8,7 @@ DRY_RUN=false
 AUTO=false
 VERBOSE=false
 ALL=false
-DEPTH=1
+DEPTH=0
 
 # Subcommand
 COMMAND=""
@@ -32,7 +32,7 @@ COMMANDS
 
 FLAGS
   --all       Broaden scope (branches: all authors; runs: all terminal statuses)
-  --depth N   How many directory levels to walk for repos (default: 1)
+  --depth N   How many directory levels to walk for repos (default: 0, current repo)
   --dry-run   Show what would happen, don't act
   --auto      Skip confirmation prompts
   --verbose   Show detail even when nothing to clean
@@ -463,28 +463,30 @@ sweep_comments() {
   true
 }
 
-sweep_caches() {
+sweep_caches_repo() {
+  local repo_dir="$1"
+
   local repo_info
-  repo_info="$(gh repo view --json owner,name --jq '.owner.login + "/" + .name')" || {
-    echo "error: not in a GitHub repository" >&2
-    exit 1
+  repo_info="$(cd "$repo_dir" && gh repo view --json owner,name --jq '.owner.login + "/" + .name')" || {
+    echo "  Skipping — not a GitHub repository"
+    return 0
   }
   local owner="${repo_info%%/*}"
   local repo="${repo_info##*/}"
 
-  echo "Fetching Actions caches for ${owner}/${repo}..."
+  echo "  Fetching Actions caches for ${owner}/${repo}..."
 
   local remote_branches
-  remote_branches="$(git ls-remote --heads origin 2>/dev/null | awk '{print $2}' | sed 's|refs/heads/||')"
+  remote_branches="$(git -C "$repo_dir" ls-remote --heads origin 2>/dev/null | awk '{print $2}' | sed 's|refs/heads/||')"
 
   local cache_json
   cache_json="$(gh api "repos/${owner}/${repo}/actions/caches" --paginate --jq '.actions_caches[] | [.id, .ref, .key, .size_in_bytes] | @tsv')" || {
-    echo "error: failed to fetch caches" >&2
-    exit 1
+    echo "  error: failed to fetch caches" >&2
+    return 1
   }
 
   if [[ -z "$cache_json" ]]; then
-    echo "No Actions caches found"
+    [[ "$VERBOSE" == true ]] && echo "  No Actions caches found"
     return 0
   fi
 
@@ -524,11 +526,11 @@ sweep_caches() {
   local stale_mb=$(( stale_bytes / 1048576 ))
 
   if [[ "$stale_count" -eq 0 ]]; then
-    echo "No stale caches found ($total_caches caches, all refs still active)"
+    echo "  No stale caches ($total_caches caches, all refs still active)"
     return 0
   fi
 
-  echo "Found $stale_count stale caches (${stale_mb}MB) from dead branches out of $total_caches total"
+  echo "  Found $stale_count stale caches (${stale_mb}MB) from dead branches out of $total_caches total"
 
   if [[ "$DRY_RUN" == true ]]; then
     local seen_refs=()
@@ -542,8 +544,8 @@ sweep_caches() {
     return 0
   fi
 
-  if [[ "$AUTO" != true ]] && ! confirm "Delete $stale_count stale caches (${stale_mb}MB)?"; then
-    echo "Skipped."
+  if [[ "$AUTO" != true ]] && ! confirm "  Delete $stale_count stale caches (${stale_mb}MB)?"; then
+    echo "  Skipped."
     return 0
   fi
 
@@ -557,27 +559,45 @@ sweep_caches() {
     fi
   done
 
-  echo "Deleted $deleted stale caches (${stale_mb}MB)"
+  echo "  Deleted $deleted stale caches (${stale_mb}MB)"
   [[ "$failed" -gt 0 ]] && echo "  $failed caches failed to delete" >&2
   true
 }
 
-sweep_runs() {
+sweep_caches() {
+  local repos=()
+  while IFS= read -r repo; do
+    repos+=("$repo")
+  done < <(discover_repos)
+
+  [[ "$DRY_RUN" == true ]] && echo "== DRY RUN =="
+  echo ""
+
+  for repo in "${repos[@]}"; do
+    echo "[$(basename "$repo")] Caches"
+    sweep_caches_repo "$repo"
+    echo ""
+  done
+}
+
+sweep_runs_repo() {
+  local repo_dir="$1"
+
   local repo_info
-  repo_info="$(gh repo view --json owner,name --jq '.owner.login + "/" + .name')" || {
-    echo "error: not in a GitHub repository" >&2
-    exit 1
+  repo_info="$(cd "$repo_dir" && gh repo view --json owner,name --jq '.owner.login + "/" + .name')" || {
+    echo "  Skipping — not a GitHub repository"
+    return 0
   }
   local owner="${repo_info%%/*}"
   local repo="${repo_info##*/}"
 
-  echo "Fetching workflow runs for ${owner}/${repo}..."
+  echo "  Fetching workflow runs for ${owner}/${repo}..."
 
   local runs
   runs="$(gh api "repos/${owner}/${repo}/actions/runs?status=completed&per_page=100" \
     --paginate --jq '.workflow_runs[] | [.id, .name, .head_branch, .conclusion, .created_at] | @tsv' 2>/dev/null)" || {
-    echo "error: failed to fetch workflow runs" >&2
-    exit 1
+    echo "  error: failed to fetch workflow runs" >&2
+    return 1
   }
 
   local run_ids=()
@@ -594,25 +614,25 @@ sweep_runs() {
   local count=${#run_ids[@]}
 
   if [[ "$count" -eq 0 ]]; then
-    echo "No workflow runs to clean up"
+    [[ "$VERBOSE" == true ]] && echo "  No workflow runs to clean up"
     return 0
   fi
 
-  echo "Found $count workflow runs to delete"
+  echo "  Found $count workflow runs to delete"
 
   if [[ "$VERBOSE" == true ]]; then
     for info in "${run_info[@]}"; do
-      echo "  $info"
+      echo "    $info"
     done
   fi
 
   if [[ "$DRY_RUN" == true ]]; then
-    echo "Would delete $count workflow runs"
+    echo "  Would delete $count workflow runs"
     return 0
   fi
 
-  if [[ "$AUTO" != true ]] && ! confirm "Delete $count workflow runs?"; then
-    echo "Skipped."
+  if [[ "$AUTO" != true ]] && ! confirm "  Delete $count workflow runs?"; then
+    echo "  Skipped."
     return 0
   fi
 
@@ -626,9 +646,25 @@ sweep_runs() {
     fi
   done
 
-  echo "Deleted $deleted workflow runs"
+  echo "  Deleted $deleted workflow runs"
   [[ "$failed" -gt 0 ]] && echo "  $failed runs failed to delete" >&2
   true
+}
+
+sweep_runs() {
+  local repos=()
+  while IFS= read -r repo; do
+    repos+=("$repo")
+  done < <(discover_repos)
+
+  [[ "$DRY_RUN" == true ]] && echo "== DRY RUN =="
+  echo ""
+
+  for repo in "${repos[@]}"; do
+    echo "[$(basename "$repo")] Runs"
+    sweep_runs_repo "$repo"
+    echo ""
+  done
 }
 
 sweep_branches() {

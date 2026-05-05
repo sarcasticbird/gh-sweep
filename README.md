@@ -35,7 +35,7 @@ gh sweep [command] [flags]
 | Flag | Description |
 |------|-------------|
 | `--all` | Include all authors' remote branches; for `runs`, include all terminal statuses |
-| `--depth N` | How many directory levels to walk for repos (default: 1) |
+| `--depth N` | How many directory levels to walk for repos (default: 0, current repo) |
 | `--dry-run` | Show what would happen, don't act |
 | `--auto` | Skip confirmation prompts |
 | `--verbose` | Show detail even when nothing to clean |
