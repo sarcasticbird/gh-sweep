@@ -127,6 +127,16 @@ check_dependencies() {
 }
 
 discover_repos() {
+  if [[ "$DEPTH" -eq 0 ]]; then
+    if git rev-parse --is-inside-work-tree &>/dev/null; then
+      printf '%s\n' "$(git rev-parse --show-toplevel)"
+    else
+      echo "No git repos found in $(pwd)" >&2
+      exit 1
+    fi
+    return
+  fi
+
   local repos=()
 
   while IFS= read -r gitdir; do
@@ -544,7 +554,7 @@ sweep_caches_repo() {
     return 0
   fi
 
-  if [[ "$AUTO" != true ]] && ! confirm "  Delete $stale_count stale caches (${stale_mb}MB)?"; then
+  if [[ "$AUTO" != true ]] && ! confirm "Delete $stale_count stale caches (${stale_mb}MB)?"; then
     echo "  Skipped."
     return 0
   fi
@@ -631,7 +641,7 @@ sweep_runs_repo() {
     return 0
   fi
 
-  if [[ "$AUTO" != true ]] && ! confirm "  Delete $count workflow runs?"; then
+  if [[ "$AUTO" != true ]] && ! confirm "Delete $count workflow runs?"; then
     echo "  Skipped."
     return 0
   fi
