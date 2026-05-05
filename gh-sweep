@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 # Flags
 DRY_RUN=false
@@ -22,7 +22,8 @@ USAGE
   gh sweep [command] [flags]
 
 COMMANDS
-  (default)        Clean merged branches + worktrees (local and remote)
+  (default)        Full sweep: branches, orphans, caches, runs, notifications
+  branches         Clean merged branches + worktrees (local and remote)
   local            Remove worktrees + delete local branches only
   remote           Delete remote branches only
   orphans          Clean up local branches with no PR and no remote
@@ -41,8 +42,9 @@ FLAGS
   --help      Show this help
 
 EXAMPLES
-  gh sweep                      # clean current repo
-  gh sweep --dry-run             # preview what would be cleaned
+  gh sweep                      # full sweep of current repo
+  gh sweep --dry-run             # preview everything that would be cleaned
+  gh sweep branches              # just merged branches + worktrees
   gh sweep local --auto          # remove local worktrees/branches, no prompts
   gh sweep remote --all          # delete all authors' remote branches
   gh sweep orphans               # clean up abandoned local-only branches
@@ -60,6 +62,7 @@ EOF
 # Parse subcommand (first positional argument)
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    branches) COMMAND="branches"; shift ;;
     local)    COMMAND="local"; shift ;;
     remote)   COMMAND="remote"; shift ;;
     orphans)  COMMAND="orphans"; shift ;;
@@ -81,7 +84,7 @@ if [[ $# -gt 0 ]]; then
       ;;
   esac
 fi
-[[ -z "$COMMAND" ]] && COMMAND="branches"
+[[ -z "$COMMAND" ]] && COMMAND="all"
 
 # Parse flags
 while [[ $# -gt 0 ]]; do
@@ -584,7 +587,7 @@ sweep_caches() {
     repos+=("$repo")
   done < <(discover_repos)
 
-  [[ "$DRY_RUN" == true ]] && echo "== DRY RUN =="
+  [[ "$DRY_RUN" == true && "$COMMAND" != "all" ]] && echo "== DRY RUN =="
   echo ""
 
   for repo in "${repos[@]}"; do
@@ -671,7 +674,7 @@ sweep_runs() {
     repos+=("$repo")
   done < <(discover_repos)
 
-  [[ "$DRY_RUN" == true ]] && echo "== DRY RUN =="
+  [[ "$DRY_RUN" == true && "$COMMAND" != "all" ]] && echo "== DRY RUN =="
   echo ""
 
   for repo in "${repos[@]}"; do
@@ -756,7 +759,7 @@ sweep_notifications() {
     repos+=("$repo")
   done < <(discover_repos)
 
-  [[ "$DRY_RUN" == true ]] && echo "== DRY RUN =="
+  [[ "$DRY_RUN" == true && "$COMMAND" != "all" ]] && echo "== DRY RUN =="
   echo ""
 
   for repo in "${repos[@]}"; do
@@ -774,7 +777,7 @@ sweep_branches() {
     repos+=("$repo")
   done < <(discover_repos)
 
-  [[ "$DRY_RUN" == true ]] && echo "== DRY RUN =="
+  [[ "$DRY_RUN" == true && "$COMMAND" != "all" ]] && echo "== DRY RUN =="
   echo ""
 
   for repo in "${repos[@]}"; do
@@ -796,7 +799,7 @@ sweep_branches() {
     done < <(get_stale_worktrees "$repo" "${merged[@]+"${merged[@]}"}")
 
     local orphans=()
-    if [[ "$COMMAND" == "orphans" ]]; then
+    if [[ "$COMMAND" == "orphans" || "$COMMAND" == "all" ]]; then
       while IFS= read -r branch; do
         [[ -n "$branch" ]] && orphans+=("$branch")
       done < <(get_orphan_branches "$repo")
@@ -813,7 +816,7 @@ sweep_branches() {
       continue
     fi
 
-    if [[ ${#merged[@]} -eq 0 && "$stale_wt_count" -eq 0 ]]; then
+    if [[ ${#merged[@]} -eq 0 && "$stale_wt_count" -eq 0 && ${#orphans[@]} -eq 0 ]]; then
       [[ "$VERBOSE" == true ]] && echo "[$repo_name] Nothing to clean"
       continue
     fi
@@ -824,22 +827,52 @@ sweep_branches() {
       if [[ "$DRY_RUN" == false ]] && ! confirm "  Proceed with merged branch cleanup?"; then
         echo "  Skipped merged cleanup."
       else
-        if [[ "$COMMAND" == "branches" || "$COMMAND" == "local" ]]; then
+        if [[ "$COMMAND" == "branches" || "$COMMAND" == "all" || "$COMMAND" == "local" ]]; then
           sweep_local "$repo" "${merged[@]}"
         fi
 
-        if [[ "$COMMAND" == "branches" || "$COMMAND" == "remote" ]]; then
+        if [[ "$COMMAND" == "branches" || "$COMMAND" == "all" || "$COMMAND" == "remote" ]]; then
           sweep_remote "$repo" "${branch_authors[@]+"${branch_authors[@]}"}"
         fi
       fi
+    fi
+
+    if [[ "$COMMAND" == "all" && ${#orphans[@]} -gt 0 ]]; then
+      echo "[$repo_name] ${#orphans[@]} orphan branches"
+      sweep_orphans "$repo" "${orphans[@]}"
     fi
 
     echo ""
   done
 }
 
+sweep_all() {
+  echo "Full sweep: branches, orphans, caches, runs, notifications"
+  if [[ "$DRY_RUN" != true && "$AUTO" != true ]]; then
+    if ! confirm "Proceed with full sweep?"; then
+      echo "Aborted."
+      exit 0
+    fi
+  fi
+  [[ "$DRY_RUN" == true ]] && echo "== DRY RUN =="
+  echo ""
+
+  local saved_auto="$AUTO"
+  AUTO=true
+
+  sweep_branches
+  sweep_caches
+  sweep_runs
+  sweep_notifications
+
+  AUTO="$saved_auto"
+}
+
 main() {
   case "$COMMAND" in
+    all)
+      sweep_all
+      ;;
     comments)
       if [[ -z "$PR_NUMBER" || ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
         echo "error: gh sweep comments requires a PR number" >&2

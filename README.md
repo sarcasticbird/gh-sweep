@@ -22,7 +22,8 @@ gh sweep [command] [flags]
 
 | Command | Description |
 |---------|-------------|
-| *(default)* | Clean merged branches + worktrees (local and remote) |
+| *(default)* | Full sweep: branches, orphans, caches, runs, notifications |
+| `branches` | Clean merged branches + worktrees (local and remote) |
 | `local` | Remove worktrees + delete local branches only |
 | `remote` | Delete remote branches only |
 | `orphans` | Clean up local branches with no PR and no remote tracking |
@@ -46,11 +47,14 @@ gh sweep [command] [flags]
 ### Examples
 
 ```sh
-# Preview what would be cleaned in the current repo
+# Full sweep — branches, orphans, caches, runs, notifications
+gh sweep
+
+# Preview everything that would be cleaned
 gh sweep --dry-run
 
-# Clean current repo — worktrees, local branches, and your remote branches
-gh sweep
+# Just merged branches + worktrees
+gh sweep branches
 
 # Clean only local worktrees and branches
 gh sweep local
@@ -100,7 +104,11 @@ gh sweep notifications --depth 2
 
 ## What it does
 
-### Branch commands (`local`, `remote`, default)
+### Default (full sweep)
+
+Running bare `gh sweep` performs a full sweep: branches, orphans, caches, runs, and notifications. You'll be prompted to confirm before anything runs (skip with `--auto`).
+
+### Branch commands (`branches`, `local`, `remote`)
 
 1. **Discovers repos** — if you're in a git repo, it operates on that one. Otherwise it walks subdirectories looking for git repos (configurable depth via `--depth`).
 2. **Fetches** — runs `git fetch --prune` to sync remote tracking state.
