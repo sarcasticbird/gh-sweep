@@ -2,7 +2,7 @@
 
 Git worktrees, branches, and review threads pile up fast when you're running parallel Claude Code sessions, reviewing PRs, or just moving between features. `gh sweep` cleans them up in one shot — across multiple repos if you want.
 
-It wraps [gh-poi](https://github.com/seachicken/gh-poi) to correctly identify squash-merged branches (which `git branch --merged` misses), adds the worktree-awareness layer that `gh-poi` lacks, walks multiple repos in a single invocation, and can bulk-resolve PR review threads.
+It wraps [gh-poi](https://github.com/seachicken/gh-poi) to correctly identify squash-merged branches (which `git branch --merged` misses), adds the worktree-awareness layer that `gh-poi` lacks, walks multiple repos in a single invocation, can bulk-resolve PR review threads, and cleans up stale GitHub Actions caches and workflow runs.
 
 ## Install
 
@@ -27,12 +27,14 @@ gh sweep [command] [flags]
 | `remote` | Delete remote branches only |
 | `orphans` | Clean up local branches with no PR and no remote tracking |
 | `comments <pr>` | Resolve all unresolved review threads on a PR |
+| `caches` | Delete Actions caches for branches that no longer exist |
+| `runs` | Delete completed workflow runs |
 
 ### Flags
 
 | Flag | Description |
 |------|-------------|
-| `--all` | Include all authors' remote branches (default: yours only) |
+| `--all` | Include all authors' remote branches; for `runs`, include all terminal statuses |
 | `--depth N` | How many directory levels to walk for repos (default: 1) |
 | `--dry-run` | Show what would happen, don't act |
 | `--auto` | Skip confirmation prompts |
@@ -75,6 +77,18 @@ gh sweep comments 42
 
 # Preview which threads would be resolved
 gh sweep comments 42 --dry-run
+
+# Delete Actions caches for dead branches
+gh sweep caches
+
+# Preview which caches would go
+gh sweep caches --dry-run
+
+# Delete completed workflow runs
+gh sweep runs
+
+# Delete all terminal workflow runs (not just completed)
+gh sweep runs --all
 ```
 
 ## What it does
@@ -95,6 +109,21 @@ Deletes local branches that have no associated PR and no remote tracking branch.
 ### `comments <pr>`
 
 Resolves all unresolved review threads on the specified PR using the GitHub GraphQL API. Auto-detects the repository from the current directory.
+
+### `caches`
+
+Deletes GitHub Actions caches associated with branches that no longer exist on the remote. Caches pile up from feature branches, dependabot PRs, and worktree-based workflows — this cleans them in one shot.
+
+- Compares each cache's `ref` against active remote branches
+- Caches for `refs/pull/*/merge` are checked against PR state (deleted if PR is closed/merged)
+- Shows total size reclaimed
+- Use `--verbose` to see individual stale cache entries
+
+### `runs`
+
+Deletes completed workflow runs from the repository. By default only targets runs with `completed` status. Use `--all` to include all terminal statuses (cancelled, failure, skipped, timed_out, etc.). Never deletes in-progress, queued, or waiting runs.
+
+- Use `--verbose` to see individual run details before deletion
 
 ## Author filtering
 
