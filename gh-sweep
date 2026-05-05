@@ -816,7 +816,7 @@ sweep_branches() {
       continue
     fi
 
-    if [[ ${#merged[@]} -eq 0 && "$stale_wt_count" -eq 0 ]]; then
+    if [[ ${#merged[@]} -eq 0 && "$stale_wt_count" -eq 0 && ${#orphans[@]} -eq 0 ]]; then
       [[ "$VERBOSE" == true ]] && echo "[$repo_name] Nothing to clean"
       continue
     fi
@@ -857,12 +857,15 @@ sweep_all() {
   [[ "$DRY_RUN" == true ]] && echo "== DRY RUN =="
   echo ""
 
+  local saved_auto="$AUTO"
   AUTO=true
 
   sweep_branches
   sweep_caches
   sweep_runs
   sweep_notifications
+
+  AUTO="$saved_auto"
 }
 
 main() {
