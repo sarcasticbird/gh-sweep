@@ -29,6 +29,7 @@ gh sweep [command] [flags]
 | `comments <pr>` | Resolve all unresolved review threads on a PR |
 | `caches` | Delete Actions caches for branches that no longer exist |
 | `runs` | Delete successful workflow runs (`--all` for all terminal statuses) |
+| `notifications` | Mark unread notifications as read and done |
 
 ### Flags
 
@@ -89,6 +90,12 @@ gh sweep runs
 
 # Delete all terminal workflow runs (not just completed)
 gh sweep runs --all
+
+# Clear unread notifications for the current repo
+gh sweep notifications
+
+# Clear notifications across all repos two levels down
+gh sweep notifications --depth 2
 ```
 
 ## What it does
@@ -124,6 +131,13 @@ Deletes GitHub Actions caches associated with branches that no longer exist on t
 Deletes workflow runs from the repository. By default only deletes successful runs. Use `--all` to include all terminal statuses (cancelled, failure, skipped, timed_out, etc.). Never deletes in-progress, queued, or waiting runs.
 
 - Use `--verbose` to see individual run details before deletion
+
+### `notifications`
+
+Marks unread notifications for the discovered repos as both read and done — clears them entirely from your inbox. Filters by repo so only notifications tied to walked repos are affected.
+
+- Use `--verbose` to see notification subjects before clearing
+- Default depth 0 means "current repo only"; `--depth N` walks subdirectories
 
 ## Author filtering
 

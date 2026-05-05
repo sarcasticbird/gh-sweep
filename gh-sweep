@@ -29,6 +29,7 @@ COMMANDS
   comments <pr>    Resolve all review threads on a PR
   caches           Delete Actions caches for branches that no longer exist
   runs             Delete successful workflow runs (--all for all terminal)
+  notifications    Mark unread notifications as read and done
 
 FLAGS
   --all       Broaden scope (branches: all authors; runs: all terminal statuses)
@@ -51,6 +52,8 @@ EXAMPLES
   gh sweep caches --dry-run      # preview which caches would be deleted
   gh sweep runs                  # delete completed workflow runs
   gh sweep runs --all            # delete runs of all statuses (not in_progress)
+  gh sweep notifications         # clear unread notifications for the current repo
+  gh sweep notifications --depth 2 # clear across all repos two levels down
 EOF
 }
 
@@ -67,8 +70,9 @@ if [[ $# -gt 0 ]]; then
         PR_NUMBER="$1"; shift
       fi
       ;;
-    caches)   COMMAND="caches"; shift ;;
-    runs)     COMMAND="runs"; shift ;;
+    caches)        COMMAND="caches"; shift ;;
+    runs)          COMMAND="runs"; shift ;;
+    notifications) COMMAND="notifications"; shift ;;
     -*) ;;  # flag, not subcommand — leave for flag parsing
     *)
       echo "Unknown command: $1" >&2
@@ -677,6 +681,91 @@ sweep_runs() {
   done
 }
 
+sweep_notifications_repo() {
+  local repo_dir="$1"
+
+  local repo_info
+  repo_info="$(cd "$repo_dir" && gh repo view --json owner,name --jq '.owner.login + "/" + .name')" || {
+    echo "  Skipping — not a GitHub repository"
+    return 0
+  }
+  local owner="${repo_info%%/*}"
+  local repo="${repo_info##*/}"
+
+  echo "  Fetching unread notifications for ${owner}/${repo}..."
+
+  local thread_data
+  thread_data="$(gh api "repos/${owner}/${repo}/notifications?all=false&per_page=100" \
+    --paginate --jq '.[] | [.id, .subject.title, .reason] | @tsv' 2>/dev/null)" || {
+    echo "  error: failed to fetch notifications" >&2
+    return 1
+  }
+
+  local thread_ids=()
+  local thread_titles=()
+  while IFS=$'\t' read -r thread_id thread_title thread_reason; do
+    [[ -z "$thread_id" ]] && continue
+    thread_ids+=("$thread_id")
+    thread_titles+=("[${thread_reason}] ${thread_title}")
+  done <<< "$thread_data"
+
+  local count=${#thread_ids[@]}
+
+  if [[ "$count" -eq 0 ]]; then
+    [[ "$VERBOSE" == true ]] && echo "  No unread notifications"
+    return 0
+  fi
+
+  echo "  Found $count unread notifications"
+
+  if [[ "$VERBOSE" == true ]]; then
+    for title in "${thread_titles[@]}"; do
+      echo "    $title"
+    done
+  fi
+
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "  Would mark $count notifications as read and done"
+    return 0
+  fi
+
+  if [[ "$AUTO" != true ]] && ! confirm "Mark $count notifications as read and done?"; then
+    echo "  Skipped."
+    return 0
+  fi
+
+  local cleared=0
+  local failed=0
+  for thread_id in "${thread_ids[@]}"; do
+    if gh api --method PATCH "notifications/threads/${thread_id}" > /dev/null 2>&1 \
+       && gh api --method DELETE "notifications/threads/${thread_id}" > /dev/null 2>&1; then
+      ((cleared++)) || true
+    else
+      ((failed++)) || true
+    fi
+  done
+
+  echo "  Cleared $cleared notifications"
+  [[ "$failed" -gt 0 ]] && echo "  $failed notifications failed to clear" >&2
+  true
+}
+
+sweep_notifications() {
+  local repos=()
+  while IFS= read -r repo; do
+    repos+=("$repo")
+  done < <(discover_repos)
+
+  [[ "$DRY_RUN" == true ]] && echo "== DRY RUN =="
+  echo ""
+
+  for repo in "${repos[@]}"; do
+    echo "[$(basename "$repo")] Notifications"
+    sweep_notifications_repo "$repo"
+    echo ""
+  done
+}
+
 sweep_branches() {
   check_dependencies
 
@@ -764,6 +853,9 @@ main() {
       ;;
     runs)
       sweep_runs
+      ;;
+    notifications)
+      sweep_notifications
       ;;
     local|remote|orphans|branches)
       sweep_branches
