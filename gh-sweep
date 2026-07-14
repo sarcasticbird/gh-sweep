@@ -368,12 +368,18 @@ prune_stale_worktree_metadata() {
 
   [[ -z "$stale" ]] && return 0
 
-  if [[ "$DRY_RUN" == true ]]; then
-    while IFS= read -r line; do
+  while IFS= read -r line; do
+    if [[ "$DRY_RUN" == true ]]; then
       echo "  Would prune stale worktree metadata: $line"
-    done <<< "$stale"
-    return 0
-  fi
+    else
+      echo "  Stale worktree metadata: $line"
+    fi
+  done <<< "$stale"
+}
+
+prune_stale_worktree_metadata_now() {
+  local repo_dir="$1"
+  local stale
 
   if ! stale="$(git -C "$repo_dir" worktree prune --expire now --verbose 2>&1)"; then
     echo "$stale" >&2
@@ -432,6 +438,10 @@ sweep_local() {
   local merged_branches=("$@")
   local wt_removed=0
   local skipped=()
+
+  if [[ "$DRY_RUN" == false ]]; then
+    prune_stale_worktree_metadata_now "$repo_dir" || return 1
+  fi
 
   while IFS=$'\t' read -r wt_branch wt_path; do
     if worktree_is_locked "$repo_dir" "$wt_path"; then

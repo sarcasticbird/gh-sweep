@@ -112,7 +112,7 @@ Running bare `gh sweep` performs a full sweep: branches, orphans, caches, runs, 
 
 1. **Discovers repos** — if you're in a git repo, it operates on that one. Otherwise it walks subdirectories looking for git repos (configurable depth via `--depth`).
 2. **Fetches** — runs `git fetch --prune` to sync remote tracking state.
-3. **Prunes dead worktree metadata** — removes records for worktree paths that no longer exist (`--dry-run` only reports them).
+3. **Reports dead worktree metadata** — local cleanup prunes these records only after confirmation (`--dry-run` only reports them).
 4. **Identifies merged branches** — uses `gh poi` for local branches and verifies linked worktree tips against merged PR commits, including squash merges.
 5. **Removes stale worktrees** — finds worktrees checked out on merged branches and removes them. Skips dirty or locked worktrees.
 6. **Deletes local branches** — uses `gh poi` to clean up local branches whose PRs are merged.
