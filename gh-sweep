@@ -162,10 +162,34 @@ discover_repos() {
   printf '%s\n' "${repos[@]}"
 }
 
+report_poi_failure() {
+  local output="$1"
+  local detail="unexpected output"
+
+  while IFS= read -r line; do
+    if [[ "$line" == "failed to run external command:"* || "$line" == error:* ]]; then
+      detail="$line"
+      break
+    fi
+  done <<< "$output"
+
+  echo "  warning: gh-poi scan failed: $detail" >&2
+}
+
 get_merged_branches() {
   local repo_dir="$1"
   local in_deleted=false
   local current_branch=""
+  local output
+
+  if ! output="$(cd "$repo_dir" && gh poi --dry-run 2>&1)"; then
+    report_poi_failure "$output"
+    return 1
+  fi
+  if [[ "$output" != *"Deleted branches"* || "$output" != *"Branches not deleted"* ]]; then
+    report_poi_failure "$output"
+    return 1
+  fi
 
   while IFS= read -r line; do
     if [[ "$line" == "Deleted branches" ]]; then
@@ -187,7 +211,46 @@ get_merged_branches() {
         current_branch=""
       fi
     fi
-  done < <(cd "$repo_dir" && gh poi --dry-run 2>&1)
+  done <<< "$output"
+}
+
+get_merged_worktree_branches() {
+  local repo_dir="$1"
+
+  while IFS=$'\t' read -r wt_branch wt_path; do
+    [[ -z "$wt_branch" || ! -d "$wt_path" ]] && continue
+    case "$wt_branch" in
+      main|master|develop) continue ;;
+    esac
+
+    local poi_locked poi_protected
+    poi_locked="$(git -C "$repo_dir" config --bool --get "branch.$wt_branch.gh-poi-locked" 2>/dev/null)" || true
+    poi_protected="$(git -C "$repo_dir" config --bool --get "branch.$wt_branch.gh-poi-protected" 2>/dev/null)" || true
+    [[ "$poi_locked" == true || "$poi_protected" == true ]] && continue
+
+    local tip
+    tip="$(git -C "$repo_dir" rev-parse --verify "refs/heads/$wt_branch" 2>/dev/null)" || continue
+
+    local pr_commits
+    if ! pr_commits="$(
+      cd "$repo_dir" && gh pr list \
+        --state merged \
+        --head "$wt_branch" \
+        --limit 10 \
+        --json author,commits \
+        --jq '.[] as $pr | $pr.commits[] | [($pr.author.login // "unknown"), .oid] | @tsv'
+    )"; then
+      echo "  warning: failed to check merged PRs for $wt_branch" >&2
+      continue
+    fi
+
+    while IFS=$'\t' read -r author oid; do
+      if [[ "$oid" == "$tip" ]]; then
+        printf '%s\t%s\n' "$wt_branch" "$author"
+        break
+      fi
+    done <<< "$pr_commits"
+  done < <(get_worktrees "$repo_dir")
 }
 
 get_orphan_branches() {
@@ -195,6 +258,16 @@ get_orphan_branches() {
   local in_not_deleted=false
   local current_branch=""
   local has_pr=false
+  local output
+
+  if ! output="$(cd "$repo_dir" && gh poi --dry-run 2>&1)"; then
+    report_poi_failure "$output"
+    return 1
+  fi
+  if [[ "$output" != *"Deleted branches"* || "$output" != *"Branches not deleted"* ]]; then
+    report_poi_failure "$output"
+    return 1
+  fi
 
   while IFS= read -r line; do
     if [[ "$line" == "Branches not deleted" ]]; then
@@ -223,7 +296,7 @@ get_orphan_branches() {
         has_pr=true
       fi
     fi
-  done < <(cd "$repo_dir" && gh poi --dry-run 2>&1)
+  done <<< "$output"
 
   if [[ -n "$current_branch" && "$has_pr" == false ]]; then
     echo "$current_branch"
@@ -258,29 +331,84 @@ sweep_orphans() {
 
 get_worktrees() {
   local repo_dir="$1"
-  local path="" branch="" is_first=true
+  local path="" branch="" is_first=true is_prunable=false
 
   while IFS= read -r line; do
     if [[ "$line" =~ ^worktree\ (.+) ]]; then
+      if [[ "$is_first" == false && "$is_prunable" == false && -n "$path" && -n "$branch" ]]; then
+        printf '%s\t%s\n' "$branch" "$path"
+      fi
+      path="${BASH_REMATCH[1]}"
+      branch=""
+      is_prunable=false
       if [[ "$is_first" == true ]]; then
         is_first=false
         path=""
-        continue
       fi
-      [[ -n "$path" && -n "$branch" ]] && printf '%s\t%s\n' "$branch" "$path"
-      path="${BASH_REMATCH[1]}"
-      branch=""
     elif [[ "$line" =~ ^branch\ refs/heads/(.+) ]]; then
       branch="${BASH_REMATCH[1]}"
+    elif [[ "$line" == prunable* ]]; then
+      is_prunable=true
     fi
   done < <(cd "$repo_dir" && git worktree list --porcelain 2>/dev/null)
 
-  [[ -n "$path" && -n "$branch" ]] && printf '%s\t%s\n' "$branch" "$path"
+  if [[ "$is_prunable" == false && -n "$path" && -n "$branch" ]]; then
+    printf '%s\t%s\n' "$branch" "$path"
+  fi
+}
+
+prune_stale_worktree_metadata() {
+  local repo_dir="$1"
+  local stale
+
+  if ! stale="$(git -C "$repo_dir" worktree prune --expire now --dry-run --verbose 2>&1)"; then
+    echo "  warning: failed to inspect stale worktree metadata" >&2
+    return 1
+  fi
+
+  [[ -z "$stale" ]] && return 0
+
+  if [[ "$DRY_RUN" == true ]]; then
+    while IFS= read -r line; do
+      echo "  Would prune stale worktree metadata: $line"
+    done <<< "$stale"
+    return 0
+  fi
+
+  if ! stale="$(git -C "$repo_dir" worktree prune --expire now --verbose 2>&1)"; then
+    echo "$stale" >&2
+    return 1
+  fi
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && echo "  $line"
+  done <<< "$stale"
 }
 
 worktree_is_dirty() {
   local wt_path="$1"
-  [[ -n "$(git -C "$wt_path" status --porcelain 2>/dev/null)" ]]
+  local status
+
+  if ! status="$(git -C "$wt_path" status --porcelain 2>/dev/null)"; then
+    return 0
+  fi
+  [[ -n "$status" ]]
+}
+
+worktree_is_locked() {
+  local repo_dir="$1"
+  local wt_path="$2"
+  local current_path=""
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^worktree\ (.+) ]]; then
+      current_path="${BASH_REMATCH[1]}"
+    elif [[ "$current_path" == "$wt_path" && "$line" == locked* ]]; then
+      return 0
+    fi
+  done < <(git -C "$repo_dir" worktree list --porcelain 2>/dev/null)
+
+  return 1
 }
 
 get_stale_worktrees() {
@@ -306,6 +434,11 @@ sweep_local() {
   local skipped=()
 
   while IFS=$'\t' read -r wt_branch wt_path; do
+    if worktree_is_locked "$repo_dir" "$wt_path"; then
+      skipped+=("$wt_branch (locked: $wt_path)")
+      continue
+    fi
+
     if worktree_is_dirty "$wt_path"; then
       skipped+=("$wt_branch (dirty: $wt_path)")
       continue
@@ -786,12 +919,34 @@ sweep_branches() {
 
     echo "[$repo_name] Fetching..."
     git -C "$repo" fetch --prune --quiet 2>&1
+    prune_stale_worktree_metadata "$repo" || true
 
     local merged=()
     local branch_authors=()
+    local merged_output=""
+    local worktree_merged_output=""
+
+    if ! merged_output="$(get_merged_branches "$repo")"; then
+      echo "  warning: gh-poi scan failed; continuing with direct worktree PR checks" >&2
+    fi
+    worktree_merged_output="$(get_merged_worktree_branches "$repo")"
+
     while IFS=$'\t' read -r branch author; do
-      [[ -n "$branch" ]] && merged+=("$branch") && branch_authors+=("$branch"$'\t'"$author")
-    done < <(get_merged_branches "$repo")
+      [[ -z "$branch" ]] && continue
+
+      local already_merged=false
+      for existing in "${merged[@]+"${merged[@]}"}"; do
+        if [[ "$existing" == "$branch" ]]; then
+          already_merged=true
+          break
+        fi
+      done
+
+      if [[ "$already_merged" == false ]]; then
+        merged+=("$branch")
+        branch_authors+=("$branch"$'\t'"$author")
+      fi
+    done <<< "$merged_output"$'\n'"$worktree_merged_output"
 
     local stale_wt_count=0
     while IFS=$'\t' read -r _ _; do
@@ -800,9 +955,13 @@ sweep_branches() {
 
     local orphans=()
     if [[ "$COMMAND" == "orphans" || "$COMMAND" == "all" ]]; then
+      local orphan_output=""
+      if ! orphan_output="$(get_orphan_branches "$repo")"; then
+        echo "  warning: orphan scan skipped because gh-poi failed" >&2
+      fi
       while IFS= read -r branch; do
         [[ -n "$branch" ]] && orphans+=("$branch")
-      done < <(get_orphan_branches "$repo")
+      done <<< "$orphan_output"
     fi
 
     if [[ "$COMMAND" == "orphans" ]]; then

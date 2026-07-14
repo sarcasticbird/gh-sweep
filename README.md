@@ -112,10 +112,11 @@ Running bare `gh sweep` performs a full sweep: branches, orphans, caches, runs, 
 
 1. **Discovers repos** — if you're in a git repo, it operates on that one. Otherwise it walks subdirectories looking for git repos (configurable depth via `--depth`).
 2. **Fetches** — runs `git fetch --prune` to sync remote tracking state.
-3. **Identifies merged branches** — uses `gh poi` to detect branches whose PRs were merged on GitHub, including squash merges.
-4. **Removes stale worktrees** — finds worktrees checked out on merged branches and removes them. Skips worktrees with uncommitted changes.
-5. **Deletes local branches** — uses `gh poi` to clean up local branches whose PRs are merged.
-6. **Deletes remote branches** — pushes deletions to origin. Defaults to only your branches; use `--all` for all authors.
+3. **Prunes dead worktree metadata** — removes records for worktree paths that no longer exist (`--dry-run` only reports them).
+4. **Identifies merged branches** — uses `gh poi` for local branches and verifies linked worktree tips against merged PR commits, including squash merges.
+5. **Removes stale worktrees** — finds worktrees checked out on merged branches and removes them. Skips dirty or locked worktrees.
+6. **Deletes local branches** — uses `gh poi` to clean up local branches whose PRs are merged.
+7. **Deletes remote branches** — pushes deletions to origin. Defaults to only your branches; use `--all` for all authors.
 
 ### `orphans`
 
@@ -167,7 +168,7 @@ Use `--verbose` to see which specific branches were skipped and their authors.
 ## Safety
 
 - Never touches `main`, `master`, or `develop` (enforced by gh-poi)
-- Skips worktrees with uncommitted changes (warns instead of removing)
+- Skips dirty or locked worktrees (warns instead of removing)
 - Asks for confirmation before destructive actions (skip with `--auto`)
 - Remote deletion scoped to your branches by default
 - Orphan deletion confirms each branch individually
