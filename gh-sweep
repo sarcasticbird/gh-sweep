@@ -927,10 +927,17 @@ sweep_branches() {
 
     echo "[$repo_name] Fetching..."
     git -C "$repo" fetch --prune --quiet 2>&1
+    local can_prune_metadata=false
+    case "$COMMAND" in
+      all|branches|local) can_prune_metadata=true ;;
+    esac
+
     local stale_metadata_found=false
     local stale_metadata_status=0
-    inspect_stale_worktree_metadata "$repo" || stale_metadata_status=$?
-    [[ "$stale_metadata_status" -eq 2 ]] && stale_metadata_found=true
+    if [[ "$can_prune_metadata" == true ]]; then
+      inspect_stale_worktree_metadata "$repo" || stale_metadata_status=$?
+      [[ "$stale_metadata_status" -eq 2 ]] && stale_metadata_found=true
+    fi
 
     local merged=()
     local branch_authors=()
@@ -986,12 +993,7 @@ sweep_branches() {
       continue
     fi
 
-    local can_prune_metadata=false
-    case "$COMMAND" in
-      all|branches|local) can_prune_metadata=true ;;
-    esac
-
-    if [[ "$stale_metadata_found" == true && "$can_prune_metadata" == true && "$DRY_RUN" == false ]]; then
+    if [[ "$stale_metadata_found" == true && "$DRY_RUN" == false ]]; then
       if confirm "  Prune stale worktree metadata?"; then
         prune_stale_worktree_metadata_now "$repo" || true
       else
