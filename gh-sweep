@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.5"
+VERSION="0.4.0"
 
 # Flags
 DRY_RUN=false
@@ -133,6 +133,17 @@ check_dependencies() {
   fi
 }
 
+checked_out_branch() {
+  git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null
+}
+
+is_protected_branch() {
+  case "$1" in
+    main|master|develop) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 discover_repos() {
   if [[ "$DEPTH" -eq 0 ]]; then
     if git rev-parse --is-inside-work-tree &>/dev/null; then
@@ -145,10 +156,51 @@ discover_repos() {
   fi
 
   local repos=()
+  local keys=()
 
-  while IFS= read -r gitdir; do
-    repos+=("$(cd "$(dirname "$gitdir")" && pwd)")
-  done < <(find . -mindepth 2 -maxdepth "$((DEPTH + 1))" -name .git -type d 2>/dev/null | sort)
+  # .git is a directory in regular repos but a file in worktrees (bare-repo
+  # layout), so match both, then dedupe worktrees of the same repo by their
+  # shared git common dir, preferring the worktree checked out on a
+  # protected branch. Worktree .git files sit one level below their
+  # container directory, so they get one extra find level to keep
+  # --depth N meaning "repos N levels down".
+  while IFS= read -r gitpath; do
+    # physical paths (pwd -P): git reports resolved paths, so symlinked
+    # locations (e.g. /var -> /private/var) would break the comparisons below
+    local dir key
+    dir="$(cd "$(dirname "$gitpath")" && pwd -P)" || continue
+    key="$(cd "$dir" && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)" || continue
+
+    # A .git file is only a bare-layout worktree if its git common dir lives
+    # in the same container directory (container/.bare next to container/main).
+    # Submodules and stray worktrees resolve elsewhere and would pull repos
+    # outside the requested depth into the sweep, so reject them.
+    if [[ -f "$gitpath" && "$(dirname "$key")" != "$(dirname "$dir")" ]]; then
+      continue
+    fi
+
+    local i seen=false
+    for ((i = 0; i < ${#keys[@]}; i++)); do
+      if [[ "${keys[$i]}" == "$key" ]]; then
+        seen=true
+        if ! is_protected_branch "$(checked_out_branch "${repos[$i]}")" &&
+          is_protected_branch "$(checked_out_branch "$dir")"; then
+          repos[$i]="$dir"
+        fi
+        break
+      fi
+    done
+
+    if [[ "$seen" == false ]]; then
+      keys+=("$key")
+      repos+=("$dir")
+    fi
+  done < <(
+    {
+      find . -mindepth 2 -maxdepth "$((DEPTH + 1))" -name .git -type d 2>/dev/null
+      find . -mindepth 2 -maxdepth "$((DEPTH + 2))" -name .git -type f 2>/dev/null
+    } | sort
+  )
 
   if [[ ${#repos[@]} -eq 0 ]]; then
     if git rev-parse --is-inside-work-tree &>/dev/null; then
@@ -160,6 +212,19 @@ discover_repos() {
   fi
 
   printf '%s\n' "${repos[@]}"
+}
+
+# A worktree named main/master is indistinguishable across repos, so label it
+# with its container directory (e.g. "myrepo/main").
+repo_label() {
+  local repo_dir="$1"
+  local name
+  name="$(basename "$repo_dir")"
+  if is_protected_branch "$name"; then
+    echo "$(basename "$(dirname "$repo_dir")")/$name"
+  else
+    echo "$name"
+  fi
 }
 
 report_poi_failure() {
@@ -219,9 +284,7 @@ get_merged_worktree_branches() {
 
   while IFS=$'\t' read -r wt_branch wt_path; do
     [[ -z "$wt_branch" || ! -d "$wt_path" ]] && continue
-    case "$wt_branch" in
-      main|master|develop) continue ;;
-    esac
+    is_protected_branch "$wt_branch" && continue
 
     local poi_locked poi_protected
     poi_locked="$(git -C "$repo_dir" config --bool --get "branch.$wt_branch.gh-poi-locked" 2>/dev/null)" || true
@@ -289,9 +352,9 @@ get_orphan_branches() {
         if [[ "$line" =~ ^\* ]]; then
           current_branch=""
         fi
-        case "$current_branch" in
-          main|master|develop) current_branch="" ;;
-        esac
+        if is_protected_branch "$current_branch"; then
+          current_branch=""
+        fi
       elif [[ "$line" =~ └─ ]]; then
         has_pr=true
       fi
@@ -442,6 +505,13 @@ sweep_local() {
   local skipped=()
 
   while IFS=$'\t' read -r wt_branch wt_path; do
+    # never remove the worktree we are operating from — later git and
+    # gh poi calls in this sweep still need it
+    if [[ "$wt_path" == "$repo_dir" ]]; then
+      skipped+=("$wt_branch (sweep root: $wt_path)")
+      continue
+    fi
+
     if worktree_is_locked "$repo_dir" "$wt_path"; then
       skipped+=("$wt_branch (locked: $wt_path)")
       continue
@@ -732,7 +802,7 @@ sweep_caches() {
   echo ""
 
   for repo in "${repos[@]}"; do
-    echo "[$(basename "$repo")] Caches"
+    echo "[$(repo_label "$repo")] Caches"
     sweep_caches_repo "$repo"
     echo ""
   done
@@ -819,7 +889,7 @@ sweep_runs() {
   echo ""
 
   for repo in "${repos[@]}"; do
-    echo "[$(basename "$repo")] Runs"
+    echo "[$(repo_label "$repo")] Runs"
     sweep_runs_repo "$repo"
     echo ""
   done
@@ -904,7 +974,7 @@ sweep_notifications() {
   echo ""
 
   for repo in "${repos[@]}"; do
-    echo "[$(basename "$repo")] Notifications"
+    echo "[$(repo_label "$repo")] Notifications"
     sweep_notifications_repo "$repo"
     echo ""
   done
@@ -923,7 +993,7 @@ sweep_branches() {
 
   for repo in "${repos[@]}"; do
     local repo_name
-    repo_name="$(basename "$repo")"
+    repo_name="$(repo_label "$repo")"
 
     echo "[$repo_name] Fetching..."
     git -C "$repo" fetch --prune --quiet 2>&1
@@ -1083,4 +1153,7 @@ main() {
   esac
 }
 
-main
+# Allow tests to source this file for its functions without running a sweep
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main
+fi
