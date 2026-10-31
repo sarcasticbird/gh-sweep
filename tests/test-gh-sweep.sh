@@ -97,17 +97,10 @@ check_discover "depth 0 inside a repo returns that repo" 0 "$TREE/regular1" "$TR
 # The worktree a sweep operates from must never be removed, even when its
 # branch is in the merged set.
 
-out="$(
-  cd "$TREE/container2/feature-y" || exit 1
-  # shellcheck disable=SC2034  # read by the sourced sweep_local
-  DRY_RUN=true
-  sweep_local "$TREE/container2/feature-y" feature-y 2>&1
-)" || out="(sweep_local failed: $out)"
-if [[ "$out" == *"sweep root"* && "$out" != *"Would remove worktree: $TREE/container2/feature-y"* ]]; then
+if ! local_safe "$TREE/container2/feature-y" feature-y "$(worktrees "$TREE/container2/feature-y")"; then
   echo "PASS: sweep root worktree is never removed"
 else
   echo "FAIL: sweep root worktree is never removed"
-  echo "  output: $out"
   fail=1
 fi
 

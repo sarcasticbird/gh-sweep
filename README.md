@@ -1,178 +1,158 @@
 # gh-sweep
 
-Git worktrees, branches, and review threads pile up fast when you're running parallel Claude Code sessions, reviewing PRs, or just moving between features. `gh sweep` cleans them up in one shot — across multiple repos if you want.
-
-It wraps [gh-poi](https://github.com/seachicken/gh-poi) to correctly identify squash-merged branches (which `git branch --merged` misses), adds the worktree-awareness layer that `gh-poi` lacks, walks multiple repos in a single invocation, can bulk-resolve PR review threads, and cleans up stale GitHub Actions caches and workflow runs.
-
-## Install
+Preview and clean merged branches, worktrees, stale Actions caches, workflow
+runs, notifications, and PR review threads across GitHub repositories.
 
 ```sh
 gh extension install sarcasticbird/gh-sweep
-```
-
-Requires [gh-poi](https://github.com/seachicken/gh-poi) for branch commands — you'll be prompted to install it on first run.
-
-## Usage
-
-```sh
-gh sweep [command] [flags]
-```
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| *(default)* | Full sweep: branches, orphans, caches, runs, notifications |
-| `branches` | Clean merged branches + worktrees (local and remote) |
-| `local` | Remove worktrees + delete local branches only |
-| `remote` | Delete remote branches only |
-| `orphans` | Clean up local branches with no PR and no remote tracking |
-| `comments <pr>` | Resolve all unresolved review threads on a PR |
-| `caches` | Delete Actions caches for branches that no longer exist |
-| `runs` | Delete successful workflow runs (`--all` for all terminal statuses) |
-| `notifications` | Mark unread notifications as read and done |
-
-### Flags
-
-| Flag | Description |
-|------|-------------|
-| `--all` | Include all authors' remote branches; for `runs`, include all terminal statuses |
-| `--depth N` | How many directory levels to walk for repos (default: 0, current repo) |
-| `--dry-run` | Show what would happen, don't act |
-| `--auto` | Skip confirmation prompts |
-| `--verbose` | Show detail even when nothing to clean |
-| `--version` | Print version |
-| `--help` | Show help |
-
-### Examples
-
-```sh
-# Full sweep — branches, orphans, caches, runs, notifications
-gh sweep
-
-# Preview everything that would be cleaned
 gh sweep --dry-run
+```
 
-# Just merged branches + worktrees
-gh sweep branches
+Requires Bash 4+, Git, `gh` and `jq`. Tools must be installed explicitly.
+`gh-sweep` never installs a dependency, invokes `gh-poi`, fetches/prunes refs,
+or prunes repository-wide worktree metadata, including during preview.
 
-# Clean only local worktrees and branches
-gh sweep local
+## Commands
 
-# Clean only your remote branches
-gh sweep remote
+| Command | Scope |
+| --- | --- |
+| No command | Branches, orphans, caches, runs, notifications |
+| `branches` | Merged local/remote branches and their clean linked worktrees |
+| `local` | Merged local branches and clean linked worktrees |
+| `remote` | Merged remote branches |
+| `orphans` | Local branches with no PR, upstream or remote head |
+| `runs` | Older eligible workflow runs after retention |
+| `caches` | Caches for absent branches or closed PRs |
+| `notifications` | Unread notifications for discovered repositories |
+| `comments <pr>` | Unresolved review threads on a PR |
 
-# Include other authors' remote branches
-gh sweep remote --all
+Literal positional `all` is not a command. Bare invocation selects a full sweep;
+`--all` is a flag that broadens eligible authors/conclusions, not a safety bypass.
 
-# Clean up abandoned local-only branches (no PR, no remote)
-gh sweep orphans
+## Flags
 
-# Walk all repos in a directory
-cd ~/Projects/VoiceBrain && gh sweep --dry-run
+| Flag | Meaning |
+| --- | --- |
+| `--dry-run` | Display the exact plan without executing effects |
+| `--auto` | Display the plan and execute without waiting for input |
+| `--user LOGIN` | Restrict run actors and branch PR authors; skip unsupported categories |
+| `--keep-runs N` | Keep newest N eligible runs per workflow; default 5, positive integers only |
+| `--include-failed` | Independently opt failed-family runs into eligibility and retention |
+| `--all` | Include all remote branch authors and other known non-failed run conclusions |
+| `--depth N` | Discover repositories N directory levels down; default 0 (current repo) |
+| `--verbose` | Accepted for scripts; exact candidates and safety diagnostics are always shown |
+| `--version`, `--help` | Version or usage |
 
-# Walk two levels deep
-gh sweep --depth 2 --dry-run
-
-# Full branch cleanup, no prompts
-gh sweep --all --auto
-
-# Resolve all review threads on PR #42
-gh sweep comments 42
-
-# Preview which threads would be resolved
+```sh
+gh sweep runs --user alice --dry-run
+gh sweep runs --include-failed --keep-runs 10 --dry-run
+gh sweep --user alice --all --dry-run
+gh sweep branches --depth 2 --dry-run
 gh sweep comments 42 --dry-run
-
-# Delete Actions caches for dead branches
-gh sweep caches
-
-# Preview which caches would go
-gh sweep caches --dry-run
-
-# Delete completed workflow runs
-gh sweep runs
-
-# Delete all terminal workflow runs (not just completed)
-gh sweep runs --all
-
-# Clear unread notifications for the current repo
-gh sweep notifications
-
-# Clear notifications across all repos two levels down
-gh sweep notifications --depth 2
 ```
 
-## What it does
+## Run Retention
 
-### Default (full sweep)
+Run attribution is **`actor.login`**, the original initiator, never
+`triggering_actor`, which can differ for a rerun. Login comparisons are
+case-insensitive. Explicit null attribution is excluded; missing or malformed
+required evidence invalidates the entire plan. This applies even without
+`--user`, so unattributed runs cannot become actionable through broad flags.
 
-Running bare `gh sweep` performs a full sweep: branches, orphans, caches, runs, and notifications. You'll be prompted to confirm before anything runs (skip with `--auto`).
+Only known `completed` runs enter conclusion selection. Active runs with a null
+conclusion are valid exclusions. Unknown states/conclusions and completed/null
+records invalidate the plan instead of deleting a valid subset.
 
-### Branch commands (`branches`, `local`, `remote`)
+| Flags | Eligible conclusions |
+| --- | --- |
+| Neither | `success` |
+| `--include-failed` | `success`, `failure`, `timed_out`, `startup_failure` |
+| `--all` | `success`, `cancelled`, `neutral`, `skipped`, `action_required`, `stale` |
+| Both | All nine known conclusions above |
 
-1. **Discovers repos** — if you're in a git repo, it operates on that one. Otherwise it walks subdirectories looking for git repos (configurable depth via `--depth`).
-2. **Fetches** — runs `git fetch --prune` to sync remote tracking state.
-3. **Reports dead worktree metadata** — local cleanup prunes these records only after confirmation (`--dry-run` only reports them).
-4. **Identifies merged branches** — uses `gh poi` for local branches and verifies linked worktree tips against merged PR commits, including squash merges.
-5. **Removes stale worktrees** — finds worktrees checked out on merged branches and removes them. Skips dirty or locked worktrees.
-6. **Deletes local branches** — uses `gh poi` to clean up local branches whose PRs are merged.
-7. **Deletes remote branches** — pushes deletions to origin. Defaults to only your branches; use `--all` for all authors.
+**Changed from the previous version:** `--all` alone does not include failed
+runs. The failed-family opt-in is independent and never bypasses retention.
 
-### `orphans`
+After attribution/status/conclusion filtering, each repository's runs are
+partitioned by `workflow_id`, not branch, name or rerun attempt. Each workflow's
+newest N eligible runs are retained in descending `created_at` order, then
+descending numeric run ID for ties. The opted-in union consumes the same slots:
+a recent failed run within the newest five stays kept. Every retained and
+candidate run ID is displayed, together with total/retained/skipped counts.
 
-Deletes local branches that have no associated PR and no remote tracking branch. Confirms each deletion individually (skip prompts with `--auto`).
+Listings are unfiltered on the server to avoid GitHub's 1,000-result filtered
+search cap. All pages must succeed, have valid schemas and stable totals, and
+reconcile to the exact unique run count. A changing/incomplete inventory fails
+closed. Required fields are run ID, workflow ID, attempt, creation timestamp,
+status, conclusion, and actor structure. Triggering actor and display names
+are not required selection evidence.
 
-### `comments <pr>`
+## Attribution Boundaries
 
-Resolves all unresolved review threads on the specified PR using the GitHub GraphQL API. Auto-detects the repository from the current directory.
+With `--user`, caches, notifications, orphan branches, unsupported comments and
+repository-wide worktree metadata are explicitly marked **not enumerated**,
+with individual missing-attribution reasons. They are not reported as zero
+discovered resources. These notices also appear for empty plans and standalone
+requests, before confirmation and in dry runs. `--all` and `--auto` cannot
+reenable them.
 
-### `caches`
+Branch cleanup reads complete PR inventories directly, rather than delegating
+to `gh-poi`. A merged PR must belong to the origin repository and bind the
+exact branch tip SHA. PR author, workflow actor and commit author are different
+identities. Conflicting/null PR authors or an open PR prevent deletion.
+Remote branches default to the authenticated user's PRs; local branches default
+to all PR authors. Explicit `--user` restricts both scopes, even with `--all`.
 
-Deletes GitHub Actions caches associated with branches that no longer exist on the remote. Caches pile up from feature branches, dependabot PRs, and worktree-based workflows — this cleans them in one shot.
+`main`, `master`, `develop`, the repository default branch, gh-poi locked or
+protected local branches, sweep-root worktrees and dirty/locked/unreadable
+worktrees are protected. Origin must be a verifiable github.com SSH/HTTPS URL
+matching the selected repository. Unsupported origins fail closed.
+Push URLs must be a single matching destination; a distinct push URL fails closed.
+Squash merges work because selection uses the merged PR's head SHA, not git ancestry.
+Local ref deletion checks the captured old OID atomically; remote deletion
+uses an explicit old-OID lease. No broad delegate can add unseen branches.
+Git hooks and fsmonitor hooks are disabled for all invocations, including reads.
 
-- Compares each cache's `ref` against active remote branches
-- Caches for `refs/pull/*/merge` are checked against PR state (deleted if PR is closed/merged)
-- Shows total size reclaimed
-- Use `--verbose` to see individual stale cache entries
+Repository-wide metadata pruning is now skipped in **all modes**, not just
+user mode: Git's broad prune cannot promise to touch only the displayed records.
+Stale metadata is left intact for a separate explicit maintenance operation.
 
-### `runs`
+## Preview And Execution
 
-Deletes workflow runs from the repository. By default only deletes successful runs. Use `--all` to include all terminal statuses (cancelled, failure, skipped, timed_out, etc.). Never deletes in-progress, queued, or waiting runs.
+All requested repositories/categories are enumerated and validated before any
+effect, including in a full sweep. Candidates are rendered as escaped JSON
+identities. Confirmation defaults to no; EOF/refusal has no effects.
+Noninteractive execution requires explicit `--auto`. No matches is explicit.
 
-- Use `--verbose` to see individual run details before deletion
+After confirmation, the whole inventory is revalidated before the first effect.
+Only unchanged captured candidates may proceed; the new inventory may narrow
+the plan but never add unseen candidates. Run details and local branch/worktree
+safety are checked again at their effect boundary. This is not an atomic GitHub
+snapshot: concurrent changes can invalidate a candidate, and the tool skips it
+or reports a failed conditional effect rather than promising a transaction.
 
-### `notifications`
+Results report completed, skipped and failed candidates. Failures return nonzero,
+even after partial work. A notification is one candidate with two effects
+(PATCH read, then DELETE done); a failed second effect is still a failed
+candidate and may leave it read. No rollback or complete-success claim is made.
 
-Marks unread notifications for the discovered repos as both read and done — clears them entirely from your inbox. Filters by repo so only notifications tied to walked repos are affected.
+## Development
 
-- Use `--verbose` to see notification subjects before clearing
-- Default depth 0 means "current repo only"; `--depth N` walks subdirectories
+The repository-owned Flox manifest contains only Bash, coreutils, findutils,
+Git, `gh`, `jq` and ShellCheck. Activation has no hooks or services. All GitHub,
+delegate and cleanup effects in safety tests are exact-argv mocks. The existing
+discovery suite creates and removes only its own temporary git fixtures.
 
-## Author filtering
-
-Remote branch deletion defaults to branches authored by the current GitHub user (determined via `gh api user`). This prevents accidentally deleting teammates' remote branches in shared repos.
-
-| Scope | Default behavior | With `--all` |
-|-------|-----------------|--------------|
-| Local (worktrees + branches) | All merged branches | Same |
-| Remote (`git push --delete`) | Your branches only | All authors |
-| Orphans | All local orphans | N/A |
-
-When branches are skipped due to author filtering, a summary is always shown:
+```sh
+# First-time provisioning requires supported FloxHub catalog authentication.
+flox edit --file .flox/env/manifest.toml
+flox activate -- bash tests/check.sh
 ```
-Skipped 3 remote branches by other authors (use --all to include)
-```
 
-Use `--verbose` to see which specific branches were skipped and their authors.
-
-## Safety
-
-- Never touches `main`, `master`, or `develop` (enforced by gh-poi)
-- Skips dirty or locked worktrees (warns instead of removing)
-- Asks for confirmation before destructive actions (skip with `--auto`)
-- Remote deletion scoped to your branches by default
-- Orphan deletion confirms each branch individually
-- Use `gh poi lock <branch>` to protect specific branches
+The generated matching `.flox/env/manifest.lock` must be recorded before treating
+the environment as reproducible acceptance evidence. See
+[implementation evidence](docs/retention-preview-evidence.md) for the source pin,
+API/delegate contracts, fixture oracles, exact commands and current limitations.
 
 ## License
 

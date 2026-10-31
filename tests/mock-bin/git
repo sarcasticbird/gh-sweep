@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export MOCK_TOOL=git
+exec bash "${BASH_SOURCE[0]%/*}/gh" "$@"
