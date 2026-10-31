@@ -144,13 +144,19 @@ delegate and cleanup effects in safety tests are exact-argv mocks. The existing
 discovery suite creates and removes only its own temporary git fixtures.
 
 ```sh
-# First-time provisioning requires supported FloxHub catalog authentication.
-flox edit --file .flox/env/manifest.toml
 flox activate -- bash tests/check.sh
 ```
 
-The generated matching `.flox/env/manifest.lock` must be recorded before treating
-the environment as reproducible acceptance evidence. See
+The matching `.flox/env/manifest.lock` is recorded. Activation uses that lock;
+changing or resolving dependencies may require FloxHub catalog authentication.
+Inside a Coop guest, use its existing `coop-env` launcher so Flox receives the
+supported guest Nix configuration:
+
+```sh
+/usr/local/libexec/coop-env flox activate -d "$PWD" -- bash tests/check.sh
+```
+
+See
 [implementation evidence](docs/retention-preview-evidence.md) for the source pin,
 API/delegate contracts, fixture oracles, exact commands and current limitations.
 

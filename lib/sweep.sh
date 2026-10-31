@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # All discovery and validation finish before the first product effect. Plans are
 # JSON lines, not shell commands; candidate data is never evaluated as code.
 
@@ -30,13 +31,16 @@ cache_plan() {
   local repo="$1" pages caches branches ref id number state
   pages="$(api "repos/$repo/actions/caches?per_page=100" --paginate --slurp)" || return 1
   caches="$(jq -ce '
-    if type != "array" or length == 0 or any(.[]; (.total_count|type) != "number" or (.actions_caches|type) != "array")
+    def integer: type == "number" and floor == . and . >= 0 and . <= 9007199254740991;
+    if type != "array" or length == 0 or any(.[]; (.total_count|integer|not) or (.actions_caches|type) != "array" or (.actions_caches|length) > 100)
     then error("invalid cache pages") else . end |
     .[0].total_count as $n | if all(.[]; .total_count == $n) then [.[].actions_caches[]] else error("changing cache total") end |
     if length != $n or (unique_by(.id)|length) != $n then error("incomplete cache inventory") else . end |
-    if all(.[]; (.id|type == "number" and . > 0 and floor == .) and (.ref|type == "string")) then . else error("invalid cache") end' <<< "$pages")" || return 1
+    if all(.[]; (.id|integer and . > 0) and
+      (.ref|type == "string" and length > 0 and (test("[\\x00-\\x20]")|not) and . != "refs/heads/"))
+    then . else error("invalid cache") end' <<< "$pages")" || return 1
   branches="$(array_pages "repos/$repo/branches?per_page=100")" || return 1
-  jq -e 'all(.[]; .name|type == "string")' <<< "$branches" >/dev/null || return 1
+  jq -e 'all(.[]; .name|type == "string" and length > 0) and (length == (unique_by(.name)|length))' <<< "$branches" >/dev/null || return 1
   while IFS= read -r cache; do
     ref="$(jq -r .ref <<< "$cache")"; id="$(jq -r .id <<< "$cache")"
     if [[ "$ref" == refs/heads/* ]]; then
@@ -65,6 +69,8 @@ comment_plan() {
   while :; do
     cursor_args=()
     [[ -z "$cursor" ]] || cursor_args=(-f "cursor=$cursor")
+    # GraphQL variables must reach GitHub literally, not expand in Bash.
+    # shellcheck disable=SC2016
     response="$(api graphql -f query='
       query($owner:String!,$repo:String!,$pr:Int!,$cursor:String) {
         repository(owner:$owner,name:$repo) { pullRequest(number:$pr) {
@@ -140,7 +146,7 @@ local_safe() {
 
 branch_plan() {
   local repo="$1" dir="$2" pulls remote locals trees branch oid matches selector="$SELECTED_USER"
-  local wt path origin origin_repo upstream push_origin
+  local wt path origin origin_repo upstream push_origin DEFAULT_BRANCH
   origin="$(git -C "$dir" remote get-url origin)" || return 1
   case "$origin" in
     https://github.com/*) origin_repo="${origin#https://github.com/}" ;;
@@ -196,11 +202,11 @@ branch_plan() {
       while IFS= read -r wt; do
         [[ "$(jq -r .branch <<< "$wt")" == "$branch" ]] || continue
         path="$(jq -r .path <<< "$wt")"
-        jq -nc --arg repo "$repo" --arg dir "$dir" --arg branch "$branch" --arg oid "$oid" --arg path "$path" \
-          '{kind:"worktree",repo:$repo,dir:$dir,branch:$branch,oid:$oid,path:$path}' >> "$PLAN"
+        jq -nc --arg repo "$repo" --arg dir "$dir" --arg branch "$branch" --arg oid "$oid" --arg path "$path" --arg default "$DEFAULT_BRANCH" \
+          '{kind:"worktree",repo:$repo,dir:$dir,branch:$branch,oid:$oid,path:$path,default_branch:$default}' >> "$PLAN"
       done <<< "$trees"
-      jq -nc --arg repo "$repo" --arg dir "$dir" --arg branch "$branch" --arg oid "$oid" \
-        '{kind:"local",repo:$repo,dir:$dir,branch:$branch,oid:$oid}' >> "$PLAN"
+      jq -nc --arg repo "$repo" --arg dir "$dir" --arg branch "$branch" --arg oid "$oid" --arg default "$DEFAULT_BRANCH" \
+        '{kind:"local",repo:$repo,dir:$dir,branch:$branch,oid:$oid,default_branch:$default}' >> "$PLAN"
     done <<< "$locals"
   fi
   if [[ "$COMMAND" != local && "$COMMAND" != orphans ]]; then
@@ -216,8 +222,8 @@ branch_plan() {
         [.[] | select(.merged_at != null) |
           select($user == "" or (.user.login|ascii_downcase) == ($user|ascii_downcase))] end end' <<< "$pulls")"
       [[ "$(jq length <<< "$matches")" -gt 0 ]] || continue
-      jq -nc --arg repo "$repo" --arg dir "$dir" --arg branch "$branch" --arg oid "$oid" --arg origin "$origin" \
-        '{kind:"remote",repo:$repo,dir:$dir,branch:$branch,oid:$oid,origin:$origin}' >> "$PLAN"
+      jq -nc --arg repo "$repo" --arg dir "$dir" --arg branch "$branch" --arg oid "$oid" --arg origin "$origin" --arg default "$DEFAULT_BRANCH" \
+        '{kind:"remote",repo:$repo,dir:$dir,branch:$branch,oid:$oid,origin:$origin,default_branch:$default}' >> "$PLAN"
     done <<< "$remote"
   fi
 }
@@ -262,9 +268,10 @@ show_plan() {
 }
 
 effect() {
-  local action="$1" kind repo id dir branch oid path current trees
+  local action="$1" kind repo id dir branch oid path current trees DEFAULT_BRANCH
   kind="$(jq -r .kind <<< "$action")"; repo="$(jq -r .repo <<< "$action")"; id="$(jq -r .id <<< "$action")"
   dir="$(jq -r .dir <<< "$action")"; branch="$(jq -r .branch <<< "$action")"; oid="$(jq -r .oid <<< "$action")"; path="$(jq -r .path <<< "$action")"
+  DEFAULT_BRANCH="$(jq -r '.default_branch // ""' <<< "$action")"
   case "$kind" in
     run)
       current="$(api "repos/$repo/actions/runs/$id")" || return 1
@@ -279,6 +286,7 @@ effect() {
       api --method PATCH "notifications/threads/$id" >/dev/null || return 1
       api --method DELETE "notifications/threads/$id" >/dev/null || return 1 ;;
     comment)
+      # shellcheck disable=SC2016
       current="$(api graphql -f query='mutation($id:ID!) { resolveReviewThread(input:{threadId:$id}) { thread { id isResolved } } }' -f id="$id")" || return 1
       jq -e --arg id "$id" '(.errors // [] | length) == 0 and .data.resolveReviewThread.thread.id == $id and .data.resolveReviewThread.thread.isResolved == true' <<< "$current" >/dev/null || return 1 ;;
     worktree|local)
@@ -305,7 +313,9 @@ effect() {
 safe_sweep() (
   export GIT_OPTIONAL_LOCKS=0
   local directory="$PWD" temporary plan fresh candidates count answer action status completed=0 skipped=0 failed=0
-  command -v gh >/dev/null && command -v jq >/dev/null || { echo 'error: gh and jq are required (install explicitly)' >&2; return 1; }
+  if ! command -v gh >/dev/null || ! command -v jq >/dev/null; then
+    echo 'error: gh and jq are required (install explicitly)' >&2; return 1
+  fi
   umask 077
   temporary="$(mktemp -d)"
   trap 'rm -rf "$temporary"' EXIT

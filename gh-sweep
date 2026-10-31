@@ -45,7 +45,7 @@ parse_args() {
         [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { echo 'error: --keep-runs requires a positive integer' >&2; return 1; }
         # jq numbers are exact up to 2^53; larger values can safely retain everything.
         KEEP_RUNS="$2"
-        if [[ ${#KEEP_RUNS} -gt 16 ]] || [[ ${#KEEP_RUNS} -eq 16 && "$KEEP_RUNS" > 9007199254740991 ]]; then
+        if [[ ${#KEEP_RUNS} -gt 16 ]] || [[ ${#KEEP_RUNS} -eq 16 && "$KEEP_RUNS" -gt 9007199254740991 ]]; then
           KEEP_RUNS=9007199254740991
         fi
         shift 2 ;;
@@ -84,6 +84,8 @@ discover_repos() {
   paths="$(mktemp)" || return 1
   find . -mindepth 2 -maxdepth "$((DEPTH+1))" -name .git -type d -print0 > "$paths" || { rm -f "$paths"; return 1; }
   find . -mindepth 2 -maxdepth "$((DEPTH+2))" -name .git -type f -print0 >> "$paths" || { rm -f "$paths"; return 1; }
+  # The private inventory is only removed on abort, never rewritten while read.
+  # shellcheck disable=SC2094
   while IFS= read -r -d '' gitpath; do
     dir="$(cd "$(dirname "$gitpath")" && pwd -P)" || return 1
     [[ "$dir" != *$'\n'* ]] || { rm -f "$paths"; echo 'error: newline in repository path is unsupported' >&2; return 1; }
@@ -96,7 +98,7 @@ discover_repos() {
         current="$(checked_out_branch "${repos[$i]}")" || { rm -f "$paths"; return 1; }
         candidate="$(checked_out_branch "$dir")" || { rm -f "$paths"; return 1; }
         if ! is_protected_branch "$current" && is_protected_branch "$candidate"; then
-          repos[$i]="$dir"
+          repos[i]="$dir"
         fi
         break
       fi

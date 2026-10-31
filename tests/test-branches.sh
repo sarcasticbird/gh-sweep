@@ -5,7 +5,7 @@ ROOT="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
 FIX="$(mktemp -d)"
 trap 'rm -rf "$FIX"' EXIT
 mkdir -p "$FIX/bin" "$FIX/home" "$FIX/repo" "$FIX/tmp"
-for tool in bash jq cat dirname mktemp rm find sort mv; do
+for tool in bash jq cat dirname mktemp rm find sort mv mkdir; do
   ln -s "$(command -v "$tool")" "$FIX/bin/$tool"
 done
 cp "$ROOT/tests/mock-bin/gh" "$ROOT/tests/mock-bin/git" "$FIX/bin/"
@@ -336,6 +336,45 @@ PULLS="$(jq -cn --argjson p "$(pr topic)" '[[$p,$p]]')"
 inventories; cli branches --user alice --all --auto
 check 'duplicate PR inventory rejected' rejected
 check 'duplicate PR inventory no effects' no_effects
+
+# Repository B's default branch must not protect an unrelated candidate in A.
+reset
+mkdir -p "$FIX/repo/a/.git" "$FIX/repo/b/.git"
+route git "$(reply .git)" rev-parse --git-common-dir
+route gh ' [{"out":"example/widgets"},{"out":"example/tools"},{"out":"example/widgets"},{"out":"example/tools"}]' \
+  repo view --json nameWithOwner --jq .nameWithOwner
+route gh ' [{"out":"main"},{"out":"topic"},{"out":"main"},{"out":"topic"}]' \
+  repo view --json defaultBranchRef --jq .defaultBranchRef.name
+for entry in a b; do
+  dir="$FIX/repo/$entry"; repo=example/widgets
+  [[ "$entry" != b ]] || repo=example/tools
+  route git "$(reply "https://github.com/$repo.git")" -C "$dir" remote get-url origin
+  route git "$(reply "https://github.com/$repo.git")" -C "$dir" remote get-url --push --all origin
+  route git "$(trees_reply "$(tree "$dir" main)")" -C "$dir" worktree list --porcelain -z
+  route git "$(reply '')" -C "$dir" for-each-ref '--format=%(refname:short)%09%(objectname)' refs/heads
+  if [[ "$entry" == a ]]; then
+    route gh "$(jq -cn --argjson p "$(pr topic)" '[{out:([[$p]]|tojson)}]')" api "repos/$repo/pulls?state=all&per_page=100" --paginate --slurp
+    route git "$(reply "$(printf '%s\trefs/heads/topic' "$OID")")" -C "$dir" ls-remote --heads origin
+    for flag in gh-poi-locked gh-poi-protected; do
+      route git "$(reply '' 1)" -C "$dir" config --type=bool --get "branch.topic.$flag"
+    done
+    route git "$(reply '')" -C "$dir" push "--force-with-lease=refs/heads/topic:$OID" origin :refs/heads/topic
+  else
+    route gh "$(reply '[[]]')" api "repos/$repo/pulls?state=all&per_page=100" --paginate --slurp
+    route git "$(reply '')" -C "$dir" ls-remote --heads origin
+  fi
+done
+cli remote --depth 1 --user alice --auto
+check 'multiple repository execution status' eq "$RC" 0
+expect_candidates 'repository-specific default protection' '[["remote","topic"]]'
+check 'multiple repository execution summary' contains 'Results: completed=1 skipped=0 failed=0'
+check 'only captured repository A is mutated' eq \
+  "$(jq -sc '[.[] | select(.effect) | .args[1]]' "$MOCK_LEDGER")" "$(jq -cn --arg dir "$FIX/repo/a" '[$dir]')"
+: > "$MOCK_LEDGER"
+route gh "$(reply 'second repository API failed' 1)" api 'repos/example/tools/pulls?state=all&per_page=100' --paginate --slurp
+cli remote --depth 1 --user alice --auto
+check 'second repository failure rejects whole request' rejected
+check 'second repository failure prevents first repository effect' no_effects
 
 # Exercise the boundary itself; unknown read failures cannot hide as empty output.
 for tool in gh git; do

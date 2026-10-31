@@ -1,8 +1,9 @@
 # Retention And Preview Evidence
 
-Status: local implementation checkpoint, **not acceptance-ready**. The matching
-Flox lock and configured-environment/lint runs remain blocked on supported
-FloxHub catalog authentication. No PR/review/QA clearance is claimed here.
+Status: author implementation validation passes in the locked repository Flox
+environment on Linux aarch64. Independent engineering review and exact-artifact
+QA remain required; this document does not claim their clearance or delivery.
+QA environment revision: `gh-sweep-attributable-retention-preview-hermetic-v1`.
 
 ## Source And Contract
 
@@ -66,37 +67,62 @@ distinguishes the failed family from other terminal conclusions.
 selected user/all/auto, exact OIDs and leased effects, protected branches,
 locks, dirty worktrees, root preservation, worktree inventory order, PR schema
 and attribution failures, later-category enumeration failure and narrowing.
+Two-repository fixtures verify that each captured action retains its own default
+branch identity, and that an API failure in repository B prevents effects in A.
 The original discovery suite retains bare-layout/depth/submodule/root checks.
 
 ## Validation Status
 
-Diagnostic runs on aarch64 Linux passed the existing six tests, 708 safety
-assertions (including repository-qualified and reconstructed-14-record oracles)
-and 518 branch assertions. These runs used available tools, **not a resolved
-repository Flox environment**, and are not acceptance or QA evidence. Bash
-syntax and `git diff --check` also passed. ShellCheck remains unrun.
-
-Flox 1.18.1 initialized repository metadata successfully. Catalog search/show
-verified the seven manifest tools, but resolution failed explicitly:
-`Resolving packages requires logging in to FloxHub`. The empty initialization
-lock was removed rather than presenting it as a matching dependency lock.
-An operator must provision supported catalog authentication or a genuinely
-resolved matching environment; do not borrow credentials or hand-edit a lock.
-
-After resolution, record the actual lock and its digest, then run:
+The following configured-environment command passes Bash syntax, ShellCheck,
+all six existing discovery/root tests, 741 safety assertions (including the
+repository-qualified and reconstructed-14-record oracles), and 528 branch
+assertions. `git diff --check` also passes. No hosted CI workflow existed at the
+pinned baseline, and this slice does not claim a hosted CI result.
 
 ```sh
-flox activate -- bash tests/check.sh
-flox activate -- bash -c 'bash --version; git --version; gh --version; jq --version; shellcheck --version'
+/usr/local/libexec/coop-env flox activate -d "$PWD" -- bash tests/check.sh
+/usr/local/libexec/coop-env flox activate -d "$PWD" -- bash -c 'flox --version; bash --version; git --version; gh --version; jq --version; shellcheck --version; uname -sm'
 sha256sum .flox/env/manifest.toml .flox/env/manifest.lock gh-sweep lib/sweep.sh lib/runs.jq
 git diff --check
 ```
 
-The manifest targets aarch64 Linux, x86_64 Linux and Apple Silicon macOS; only
-aarch64 Linux diagnostic execution has occurred. macOS and x86_64 Linux are
-unverified. No live GitHub/user-workspace cleanup, release, deployment, restart
-or merge was used as a test. Independent exact-head review and QA remain
-separate required gates, using the PR source artifact, never an older build.
+The initial unauthenticated catalog-resolution refusal was resolved by an
+operator-generated matching lock using authenticated Flox 1.19.1 and the exact
+unchanged manifest. No credentials were transferred and no lock entries were
+hand-authored. The guest's existing `coop-env` launcher activates using Flox
+1.18.1-gf264cf2 with its supported single-user Nix configuration. Activation
+works from the recorded lock without catalog authentication; no product code
+provisions tools or invokes Flox.
+
+| Tool | Tested Version |
+| --- | --- |
+| Bash | 5.3.20 |
+| Git | 2.56.0 |
+| GitHub CLI | 2.103.3 |
+| jq | 1.8.2 |
+| ShellCheck | 0.11.0 |
+| coreutils | 9.12 (locked) |
+| findutils | 4.11.0 (locked) |
+
+The lock has 21 entries: seven packages across aarch64 Linux, x86_64 Linux and
+Apple Silicon macOS, all at Flox nixpkgs revision
+`1c89083e451e891152365b799595cf7790a43325`. Only Linux aarch64 was executed;
+the other two systems are resolved, **not tested**. No live GitHub/user-workspace
+cleanup, release, deployment, restart or merge was used as a test. Independent
+exact-head review and QA remain separate gates using the PR source artifact,
+never an older build.
+
+| Source / Environment File | SHA256 |
+| --- | --- |
+| `.flox/env/manifest.toml` | `3d2f963fe4ab0ca5008539dc1e916137c0474bf28175ba18afa8cca3b8363f12` |
+| `.flox/env/manifest.lock` | `c1bc569e5a2afc811ec14c78957cacf1a76879426650ac6144f2bf36f9bd2bf4` |
+| `gh-sweep` | `1f16468d3d35443c72af9bab07191ded9e6e4682b849777086a99186293b17ba` |
+| `lib/sweep.sh` | `1c99c65112f254394c043571773ad52100a1148ec2e5db874714a90779aa6484` |
+| `lib/runs.jq` | `588d0b7577fc78ed65817f4f3376a42d9c8167f10b2665386c1f4b514804b559` |
 
 The interactive refusal fixture uses `script` only when available and otherwise
-prints an explicit platform skip. Noninteractive refusal is always tested.
+prints an explicit platform skip. Linux validation exercised it with util-linux
+`script` 2.39.3, the host PTY utility outside the seven-package lock. This PTY
+adapter is a disclosed platform limit, not a product dependency; gh/git/effects
+remain mocked inside the spawned process. Noninteractive refusal is always
+tested without it.

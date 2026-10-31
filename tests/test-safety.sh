@@ -271,6 +271,10 @@ check 'no unseen delete' ledger '[.[] | select(.effect) | .args[-1]] == ["repos/
 execution "$(runs 7)" 0 "$(runs 7 | jq -c '.[0] | .run_attempt=2')"
 check 'detail rerun skips changed identity' contains 'Results: completed=1 skipped=1 failed=0'
 check 'detail rerun no changed delete' ledger '[.[] | select(.effect) | .args[-1]] == ["repos/example/widgets/actions/runs/2"]'
+execution "$(runs 7)" 0 "$(runs 7 | jq -c '.[0] | del(.actor)')"
+check 'malformed execution-time attribution fails' test "$RC" -ne 0
+check 'malformed execution-time attribution summary' contains 'Results: completed=1 skipped=0 failed=1'
+check 'malformed execution-time attribution never deleted' ledger '[.[] | select(.effect) | .args[-1]] == ["repos/example/widgets/actions/runs/2"]'
 execution '[]'
 check 'empty fresh inventory skips all original candidates' contains 'Results: completed=0 skipped=2 failed=0'
 check 'empty fresh inventory no effects' dry_safe
@@ -348,6 +352,8 @@ else
 fi
 
 # Match the complete GraphQL argv, including namespace and pagination cursor.
+# GraphQL variables are literal API input.
+# shellcheck disable=SC2016
 query='
       query($owner:String!,$repo:String!,$pr:Int!,$cursor:String) {
         repository(owner:$owner,name:$repo) { pullRequest(number:$pr) {
@@ -356,6 +362,7 @@ query='
           }
         } }
       }'
+# shellcheck disable=SC2016
 mutation='mutation($id:ID!) { resolveReviewThread(input:{threadId:$id}) { thread { id isResolved } } }'
 comments() {
   reset
@@ -399,6 +406,16 @@ for category in notifications caches; do
   cli "$category" --auto
   check "$category malformed inventory refuses" test "$RC" -ne 0
   check "$category malformed inventory zero effects" dry_safe
+done
+
+for change in '.id=0' '.id=1.5' '.id=9007199254740992' 'del(.id)' '.ref=""' '.ref="refs/heads/"' '.ref="refs/heads/bad name"'; do
+  nonuser
+  jq 'map(select(.args[1] != "repos/example/widgets/actions/caches?per_page=100"))' "$MOCK_ROUTES" > "$FIX/next"; mv_fixture
+  bad="$(jq -cn "[{total_count:1,actions_caches:[({id:41,ref:\"refs/heads/gone\"}|$change)]}]")"
+  route gh "$(reply "$bad")" api 'repos/example/widgets/actions/caches?per_page=100' --paginate --slurp
+  cli caches --auto
+  check "malformed cache $change rejected" rejected
+  check "malformed cache $change zero effects" dry_safe
 done
 
 # Ensure the boundary itself records and refuses unknown reads, writes and delegates.
