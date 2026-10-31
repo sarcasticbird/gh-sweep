@@ -112,7 +112,7 @@ expect_effects() {
   local expected
   expected="$(jq -c --arg dir "$FIX/repo" --arg oid "$OID" 'map(
     if .[0] == "local" then ["-C",$dir,"update-ref","-d",("refs/heads/"+.[1]),$oid]
-    elif .[0] == "worktree" then ["-C",$dir,"worktree","remove","--",.[1]]
+    elif .[0] == "worktree" then ["-c","status.showUntrackedFiles=all","-C",$dir,"worktree","remove","--",.[1]]
     else ["-C",$dir,"push",("--force-with-lease=refs/heads/"+.[1]+":"+$oid),"origin",(":refs/heads/"+.[1])] end)' <<< "$2")"
   check "$1 exact ordered effects" eq "$(jq -sc '[.[] | select(.effect) | .args]' "$MOCK_LEDGER")" "$expected"
 }
@@ -154,6 +154,36 @@ for command in branches local remote full; do
   done
 done
 
+# Orphan exclusion requires a complete remote ref, not a prefix collision.
+for command in orphans full; do
+  for remote_kind in none prefix child exact-first exact-last; do
+    for mode in dry execute; do
+      reset; PULLS='[[]]'; LOCALS="$(printf 'topic\t%s' "$OID")"
+      for branch in topic-extra topic/child; do
+        config "$branch" gh-poi-locked
+        config "$branch" gh-poi-protected
+      done
+      case "$remote_kind" in
+        none) REMOTE='' ;;
+        prefix) REMOTE="$(printf '%s\trefs/heads/topic-extra' "$OID")" ;;
+        child) REMOTE="$(printf '%s\trefs/heads/topic/child' "$OID")" ;;
+        exact-first) REMOTE="$(printf '%s\trefs/heads/topic\n%s\trefs/heads/topic-extra' "$OID" "$OID")" ;;
+        exact-last) REMOTE="$(printf '%s\trefs/heads/topic-extra\n%s\trefs/heads/topic' "$OID" "$OID")" ;;
+      esac
+      inventories
+      flags=(); [[ "$command" == full ]] || flags+=(orphans)
+      [[ "$mode" == dry ]] && flags+=(--dry-run) || flags+=(--auto)
+      expected='[["local","topic"]]'
+      [[ "$remote_kind" != exact-* ]] || expected='[]'
+      cli "${flags[@]}"
+      check "$command $remote_kind $mode status" eq "$RC" 0
+      expect_candidates "$command $remote_kind $mode" "$expected"
+      if [[ "$mode" == dry ]]; then check "$command $remote_kind preview has no effects" no_effects
+      else expect_effects "$command $remote_kind execution" "$expected"; fi
+    done
+  done
+done
+
 # Protected names, both gh-poi flags, root, dirty, locked and prunable worktrees.
 for unsafe in main master develop locked protected root dirty wt-locked prunable; do
   for mode in dry execute; do
@@ -170,7 +200,7 @@ for unsafe in main master develop locked protected root dirty wt-locked prunable
         flag=''; [[ "$unsafe" != wt-locked ]] || flag='locked reason'
         [[ "$unsafe" != prunable ]] || flag='prunable reason'
         TREES="$(tree "$FIX/linked tree" topic "$flag")"
-        route git "$(reply ' M tracked')" --no-optional-locks -C "$FIX/linked tree" status --porcelain;;
+        route git "$(reply ' M tracked')" --no-optional-locks -C "$FIX/linked tree" status --porcelain --untracked-files=all;;
     esac
     inventories
     flags=(local --all); [[ "$mode" != dry ]] && flags+=(--auto) || flags+=(--dry-run)
@@ -193,8 +223,8 @@ for order in linked-first linked-last; do
   TREES="$(jq -cn --arg order "$order" --argjson a "$TREES" --argjson b "$(tree "$FIX/linked tree" topic)" \
     'if $order == "linked-first" then $b+$a else $a+$b end')"
   inventories
-  route git "$(reply '')" --no-optional-locks -C "$FIX/linked tree" status --porcelain
-  route git "$(reply '')" -C "$FIX/repo" worktree remove -- "$FIX/linked tree"
+  route git "$(reply '')" --no-optional-locks -C "$FIX/linked tree" status --porcelain --untracked-files=all
+  route git "$(reply '')" -c status.showUntrackedFiles=all -C "$FIX/repo" worktree remove -- "$FIX/linked tree"
   if [[ "$mode" == execute ]]; then
     route git "$(jq -cn --argjson before "$TREES" --argjson after "$(tree "$FIX/repo" main)" \
       '[{out:$before},{out:$before},{out:$before},{out:$after}]')" -C "$FIX/repo" worktree list --porcelain -z

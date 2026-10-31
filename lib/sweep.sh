@@ -138,7 +138,7 @@ local_safe() {
     path="$(jq -r .path <<< "$wt")"
     [[ "$path" == "$dir" ]] && return 1
     [[ "$(jq -r '.locked or .prunable' <<< "$wt")" == true ]] && return 1
-    status="$(git --no-optional-locks -C "$path" status --porcelain)" || return 1
+    status="$(git --no-optional-locks -C "$path" status --porcelain --untracked-files=all)" || return 1
     [[ -n "$status" ]] && return 1
   done <<< "$trees"
   return 0
@@ -188,7 +188,8 @@ branch_plan() {
         [[ "$(jq length <<< "$matches")" -eq 0 ]] || continue
         upstream="$(git -C "$dir" for-each-ref --format='%(upstream)' "refs/heads/$branch")" || return 1
         [[ -z "$upstream" ]] || continue
-        [[ "$remote" == *$'\t'"refs/heads/$branch"* ]] && continue
+        # Include the final record boundary so topic-extra/child cannot match topic.
+        [[ "$remote"$'\n' == *$'\t'"refs/heads/$branch"$'\n'* ]] && continue
       else
         [[ "$COMMAND" == orphans ]] && continue
         matches="$(jq -c --arg oid "$oid" --arg user "$SELECTED_USER" --arg repo "$repo" '
@@ -296,7 +297,7 @@ effect() {
       local_safe "$dir" "$branch" "$trees" || return 2
       if [[ "$kind" == worktree ]]; then
         jq -se --arg path "$path" --arg branch "$branch" 'any(.[]; .path == $path and .branch == $branch)' <<< "$trees" >/dev/null || return 2
-        git -C "$dir" worktree remove -- "$path" || return 1
+        git -c status.showUntrackedFiles=all -C "$dir" worktree remove -- "$path" || return 1
       else
         jq -se --arg branch "$branch" 'all(.[]; .branch != $branch)' <<< "$trees" >/dev/null || return 2
         git -C "$dir" update-ref -d "refs/heads/$branch" "$oid" || return 1

@@ -1,7 +1,8 @@
 # Retention And Preview Evidence
 
-Status: author implementation validation passes in the locked repository Flox
-environment on Linux aarch64. Independent engineering review and exact-artifact
+Status: author implementation validation passes with the recorded supported
+tools on Linux aarch64. The retained Flox environment is optional inside Coop.
+Independent engineering review and exact-artifact
 QA remain required; this document does not claim their clearance or delivery.
 QA environment revision: `gh-sweep-attributable-retention-preview-hermetic-v1`.
 
@@ -70,18 +71,39 @@ and attribution failures, later-category enumeration failure and narrowing.
 Two-repository fixtures verify that each captured action retains its own default
 branch identity, and that an API failure in repository B prevents effects in A.
 The original discovery suite retains bare-layout/depth/submodule/root checks.
+It also uses real Git only in private disposable fixtures to reject hidden
+untracked data, inject an untracked file between the clean status check and
+removal, and verify that the removal command itself refuses rather than deleting
+that file. A clean-removal control still succeeds. No fixture accesses user
+workspaces or performs live GitHub cleanup.
+
+## Review Fixes
+
+[Hawk's independent review of fa6f231](https://github.com/sarcasticbird/gh-sweep/pull/9#pullrequestreview-5724719173)
+identified two defects. Both were reproduced before the product fix: the real
+Git suite failed two new safety checks, and branch fixtures failed 12 assertions
+for orphan names colliding with remote `topic-extra` or `topic/child` refs.
+
+The fix makes untracked enumeration explicit during `local_safe` and forces
+`status.showUntrackedFiles=all` on the removal command independently. It also
+matches the complete remote ref at a record boundary, not a prefix. The branch
+matrix covers standalone orphans and full sweeps, previews and execution, no
+remote ref, both prefix collisions, and an exact ref as either the first or last
+record. Only the exact ref excludes the orphan candidate. The new head requires
+renewed independent review and separate QA; author red/green checks are not
+those clearances.
 
 ## Validation Status
 
-The following configured-environment command passes Bash syntax, ShellCheck,
-all six existing discovery/root tests, 741 safety assertions (including the
-repository-qualified and reconstructed-14-record oracles), and 528 branch
+The following supported-tool command passes Bash syntax, ShellCheck, all nine
+disposable-Git/discovery/root checks, 741 safety assertions (including the
+repository-qualified and reconstructed-14-record oracles), and 628 branch
 assertions. `git diff --check` also passes. No hosted CI workflow existed at the
 pinned baseline, and this slice does not claim a hosted CI result.
 
 ```sh
-/usr/local/libexec/coop-env flox activate -d "$PWD" -- bash tests/check.sh
-/usr/local/libexec/coop-env flox activate -d "$PWD" -- bash -c 'flox --version; bash --version; git --version; gh --version; jq --version; shellcheck --version; uname -sm'
+PATH="$PWD/.flox/run/aarch64-linux.gh-sweep-dev/bin:$PATH" bash tests/check.sh
+PATH="$PWD/.flox/run/aarch64-linux.gh-sweep-dev/bin:$PATH" bash -c 'bash --version; git --version; gh --version; jq --version; shellcheck --version; uname -sm'
 sha256sum .flox/env/manifest.toml .flox/env/manifest.lock gh-sweep lib/sweep.sh lib/runs.jq
 git diff --check
 ```
@@ -89,10 +111,14 @@ git diff --check
 The initial unauthenticated catalog-resolution refusal was resolved by an
 operator-generated matching lock using authenticated Flox 1.19.1 and the exact
 unchanged manifest. No credentials were transferred and no lock entries were
-hand-authored. The guest's existing `coop-env` launcher activates using Flox
-1.18.1-gf264cf2 with its supported single-user Nix configuration. Activation
-works from the recorded lock without catalog authentication; no product code
-provisions tools or invokes Flox.
+hand-authored. Initial validation used guest Flox 1.18.1-gf264cf2. The current
+launcher instead selects an older Flox that rejects this lock schema; this fix
+uses the already-materialized repository tools directly, without activation,
+resolution or provisioning. The owner clarified that Flox is optional inside
+Coop and supported container tools with recorded versions suffice. No manifest,
+lock, activation hook or product dependency machinery changed for this fix.
+No product code provisions tools or invokes Flox. The direct test runner also
+works wherever the listed tools are available on PATH.
 
 | Tool | Tested Version |
 | --- | --- |
@@ -117,7 +143,7 @@ never an older build.
 | `.flox/env/manifest.toml` | `3d2f963fe4ab0ca5008539dc1e916137c0474bf28175ba18afa8cca3b8363f12` |
 | `.flox/env/manifest.lock` | `c1bc569e5a2afc811ec14c78957cacf1a76879426650ac6144f2bf36f9bd2bf4` |
 | `gh-sweep` | `1f16468d3d35443c72af9bab07191ded9e6e4682b849777086a99186293b17ba` |
-| `lib/sweep.sh` | `1c99c65112f254394c043571773ad52100a1148ec2e5db874714a90779aa6484` |
+| `lib/sweep.sh` | `204c6aede3e927f7aec2d2d5905421dbfec65a3e55626da8447edcab1e1987fb` |
 | `lib/runs.jq` | `588d0b7577fc78ed65817f4f3376a42d9c8167f10b2665386c1f4b514804b559` |
 
 The interactive refusal fixture uses `script` only when available and otherwise

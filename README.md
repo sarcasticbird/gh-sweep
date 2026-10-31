@@ -105,8 +105,11 @@ to all PR authors. Explicit `--user` restricts both scopes, even with `--all`.
 
 `main`, `master`, `develop`, the repository default branch, gh-poi locked or
 protected local branches, sweep-root worktrees and dirty/locked/unreadable
-worktrees are protected. Origin must be a verifiable github.com SSH/HTTPS URL
-matching the selected repository. Unsupported origins fail closed.
+worktrees are protected.
+Untracked files are checked explicitly regardless of `status.showUntrackedFiles`;
+the removal command also forces that guard so a late file is not hidden by config.
+Origin must be a verifiable github.com SSH/HTTPS URL matching the selected
+repository. Unsupported origins fail closed.
 Push URLs must be a single matching destination; a distinct push URL fails closed.
 Squash merges work because selection uses the merged PR's head SHA, not git ancestry.
 Local ref deletion checks the captured old OID atomically; remote deletion
@@ -138,23 +141,22 @@ candidate and may leave it read. No rollback or complete-success claim is made.
 
 ## Development
 
-The repository-owned Flox manifest contains only Bash, coreutils, findutils,
-Git, `gh`, `jq` and ShellCheck. Activation has no hooks or services. All GitHub,
+Flox is optional inside Coop containers. Tests and lint can use the container's
+supported tools directly, with their versions recorded in the evidence.
+The repository-owned Flox manifest remains available for local development and
+contains only Bash, coreutils, findutils, Git, `gh`, `jq` and ShellCheck.
+Activation has no hooks or services. All GitHub,
 delegate and cleanup effects in safety tests are exact-argv mocks. The existing
 discovery suite creates and removes only its own temporary git fixtures.
 
 ```sh
+bash tests/check.sh
+# Optional local development environment:
 flox activate -- bash tests/check.sh
 ```
 
 The matching `.flox/env/manifest.lock` is recorded. Activation uses that lock;
 changing or resolving dependencies may require FloxHub catalog authentication.
-Inside a Coop guest, use its existing `coop-env` launcher so Flox receives the
-supported guest Nix configuration:
-
-```sh
-/usr/local/libexec/coop-env flox activate -d "$PWD" -- bash tests/check.sh
-```
 
 See
 [implementation evidence](docs/retention-preview-evidence.md) for the source pin,
