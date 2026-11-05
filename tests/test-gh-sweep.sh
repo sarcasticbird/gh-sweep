@@ -97,17 +97,65 @@ check_discover "depth 0 inside a repo returns that repo" 0 "$TREE/regular1" "$TR
 # The worktree a sweep operates from must never be removed, even when its
 # branch is in the merged set.
 
-out="$(
-  cd "$TREE/container2/feature-y" || exit 1
-  # shellcheck disable=SC2034  # read by the sourced sweep_local
-  DRY_RUN=true
-  sweep_local "$TREE/container2/feature-y" feature-y 2>&1
-)" || out="(sweep_local failed: $out)"
-if [[ "$out" == *"sweep root"* && "$out" != *"Would remove worktree: $TREE/container2/feature-y"* ]]; then
+if ! local_safe "$TREE/container2/feature-y" feature-y "$(worktrees "$TREE/container2/feature-y")"; then
   echo "PASS: sweep root worktree is never removed"
 else
   echo "FAIL: sweep root worktree is never removed"
-  echo "  output: $out"
+  fail=1
+fi
+
+# --- untracked data protection with real disposable Git -------------------
+safety_root="$FIX/worktree-safety"
+hidden_path="$FIX/hidden-untracked"
+race_path="$FIX/late-untracked"
+clean_path="$FIX/clean-removal"
+git init -q -b main "$safety_root"
+git -C "$safety_root" commit -q --allow-empty -m init
+git -C "$safety_root" config status.showUntrackedFiles no
+git -C "$safety_root" worktree add -q -b hidden-topic "$hidden_path"
+printf '%s\n' 'synthetic untracked data' > "$hidden_path/untracked.txt"
+if local_safe "$safety_root" hidden-topic "$(worktrees "$safety_root")"; then
+  echo 'FAIL: hidden untracked files make a worktree ineligible'
+  fail=1
+else
+  echo 'PASS: hidden untracked files make a worktree ineligible'
+fi
+
+git -C "$safety_root" worktree add -q -b race-topic "$race_path"
+oid="$(git -C "$safety_root" rev-parse HEAD)"
+action="$(jq -nc --arg dir "$safety_root" --arg path "$race_path" --arg oid "$oid" \
+  '{kind:"worktree",repo:"example/widgets",dir:$dir,path:$path,branch:"race-topic",oid:$oid,default_branch:"main"}')"
+rc=0
+out="$(
+  # Inject only after the real clean status check, before the real removal.
+  # This simulates a concurrent writer without modifying any user workspace.
+  git() {
+    local status=0
+    command git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@" || status=$?
+    if [[ "$status" -eq 0 && "${1:-}" == --no-optional-locks && "${2:-}" == -C && "${3:-}" == "$race_path" && "${4:-}" == status ]]; then
+      printf '%s\n' 'synthetic concurrent data' > "$race_path/late.txt"
+    fi
+    return "$status"
+  }
+  effect "$action" 2>&1
+)" || rc=$?
+if [[ "$rc" -eq 1 && -f "$race_path/late.txt" && "$(< "$race_path/late.txt")" == 'synthetic concurrent data' ]]; then
+  echo 'PASS: removal independently preserves late untracked files despite hidden status configuration'
+else
+  echo 'FAIL: removal independently preserves late untracked files despite hidden status configuration'
+  echo "  status=$rc output=$out"
+  fail=1
+fi
+
+git -C "$safety_root" worktree add -q -b clean-topic "$clean_path"
+action="$(jq -nc --arg dir "$safety_root" --arg path "$clean_path" --arg oid "$oid" \
+  '{kind:"worktree",repo:"example/widgets",dir:$dir,path:$path,branch:"clean-topic",oid:$oid,default_branch:"main"}')"
+rc=0
+effect "$action" || rc=$?
+if [[ "$rc" -eq 0 && ! -d "$clean_path" ]]; then
+  echo 'PASS: clean disposable worktree removal still succeeds with hidden status configuration'
+else
+  echo 'FAIL: clean disposable worktree removal still succeeds with hidden status configuration'
   fail=1
 fi
 

@@ -1,0 +1,13 @@
+schema-version = "1.18.0"
+
+[install]
+bash.pkg-path = "bashInteractive"
+coreutils.pkg-path = "coreutils"
+findutils.pkg-path = "findutils"
+git.pkg-path = "git"
+gh.pkg-path = "gh"
+jq.pkg-path = "jq"
+shellcheck.pkg-path = "shellcheck"
+
+[options]
+systems = ["aarch64-linux", "x86_64-linux", "aarch64-darwin"]

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Exact argv allowlist; never falls through to a real executable.
+set -euo pipefail
+tool="${MOCK_TOOL:-${0##*/}}"
+args="$(jq -cn --args '$ARGS.positional' -- "$@")"
+raw_args="$args"
+safe_git=false
+if [[ "$tool" == git ]] && jq -e '.[0:4] == ["-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false"]' <<< "$args" >/dev/null; then
+  safe_git=true
+  args="$(jq -c '.[4:]' <<< "$args")"
+fi
+route="$(jq -c --arg tool "$tool" --argjson args "$args" '[.[] | select(.tool == $tool and .args == $args)] | if length == 1 then .[0] else null end' "$MOCK_ROUTES")"
+effect=false
+case " $* " in
+  *' DELETE '*|*' PATCH '*|*' POST '*|*' PUT '*|*mutation*|*' push '*|*' update-ref '*|*' fetch '*|*' prune '*|*' remove '*|*' install '*) effect=true ;;
+esac
+[[ "$tool" == gh || "$tool" == git ]] || effect=true
+known=true
+[[ "$route" != null ]] || known=false
+[[ "$known" == true ]] || effect=true
+index="$(jq -s --arg tool "$tool" --argjson args "$args" '[.[] | select(.tool == $tool and .args == $args)] | length' "$MOCK_LEDGER")"
+jq -cn --arg tool "$tool" --argjson args "$args" --argjson effect "$effect" --argjson known "$known" \
+  --argjson raw_args "$raw_args" --argjson safe_git "$safe_git" \
+  '{tool:$tool,args:$args,raw_args:$raw_args,safe_git:$safe_git,effect:$effect,known:$known}' >> "$MOCK_LEDGER"
+if [[ "$known" == false ]]; then
+  printf 'UNEXPECTED %s %s\n' "$tool" "$args" >&2
+  exit 97
+fi
+reply="$(jq -c --argjson n "$index" '.replies[([$n, ((.replies|length)-1)] | min)]' <<< "$route")"
+jq -r '.out // ""' <<< "$reply"
+exit "$(jq -r '.status // 0' <<< "$reply")"
