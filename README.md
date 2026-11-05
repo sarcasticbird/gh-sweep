@@ -9,6 +9,17 @@ gh sweep --dry-run
 ```
 
 Requires Bash 4+, Git, `gh` and `jq`. Tools must be installed explicitly.
+The extension's `#!/usr/bin/env bash` selects Bash from `PATH`, not your login
+shell. macOS ships Bash 3.2; unsupported Bash is rejected before repository
+discovery, API calls or cleanup. Install a current Bash explicitly, then use its
+directory for just this invocation (replace the example path):
+
+```sh
+env PATH="/absolute/path/to/new-bash/bin:$PATH" gh sweep branches --dry-run
+```
+
+This does not change shell configuration or saved `PATH`. The extension does not
+install Bash or modify either for you.
 `gh-sweep` never installs a dependency, invokes `gh-poi`, fetches/prunes refs,
 or prunes repository-wide worktree metadata, including during preview.
 
@@ -154,6 +165,13 @@ bash tests/check.sh
 # Optional local development environment:
 flox activate -- bash tests/check.sh
 ```
+
+The extension tests use an installed `gh` to dispatch a private copied extension,
+with product GitHub/Git calls mocked. Set `SWEEP_TEST_GH_CLI` to an absolute CLI
+path if `gh` on `PATH` is a wrapper. Set `SWEEP_TEST_LEGACY_BASH` to an already
+installed Bash 3.2 to reproduce the library failure and verify early rejection.
+Without it, the suite labels that check skipped; the synthetic version-gate
+test is not macOS or Bash 3.2 execution evidence.
 
 The matching `.flox/env/manifest.lock` is recorded. Activation uses that lock;
 changing or resolving dependencies may require FloxHub catalog authentication.

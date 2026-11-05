@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# Standalone CLI diagnostics: only shared exact-argv mocks can reach git or gh.
+# Product git/gh calls use exact-argv mocks, including in a private extension.
 set -euo pipefail
 ROOT="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
+GH_CLI="${SWEEP_TEST_GH_CLI:-$(command -v gh)}"
 FIX="$(mktemp -d)"
 trap 'rm -rf "$FIX"' EXIT
 mkdir -p "$FIX/bin" "$FIX/home" "$FIX/repo" "$FIX/tmp"
-for tool in bash jq cat dirname mktemp rm find sort mv mkdir; do
+# Exercise the executable and sibling libraries in a disposable extension layout.
+mkdir -p "$FIX/data/gh/extensions/gh-sweep"
+cp "$ROOT/gh-sweep" "$FIX/data/gh/extensions/gh-sweep/gh-sweep"
+cp -R "$ROOT/lib" "$FIX/data/gh/extensions/gh-sweep/lib"
+ENTRYPOINT="$FIX/data/gh/extensions/gh-sweep/gh-sweep"
+ln -s "$BASH" "$FIX/bin/bash"
+for tool in jq cat dirname mktemp rm find sort mv mkdir; do
   ln -s "$(command -v "$tool")" "$FIX/bin/$tool"
 done
 cp "$ROOT/tests/mock-bin/gh" "$ROOT/tests/mock-bin/git" "$FIX/bin/"
@@ -14,6 +21,7 @@ for tool in npm npx brew apt apt-get sudo curl wget gh-poi poi; do
   ln -s "$FIX/bin/gh" "$FIX/bin/$tool"
 done
 export PATH="$FIX/bin" HOME="$FIX/home" TMPDIR="$FIX/tmp" SHELL="$FIX/bin/bash"
+export XDG_DATA_HOME="$FIX/data"
 export GH_CONFIG_DIR="$FIX/home/gh" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export MOCK_ROUTES="$FIX/routes" MOCK_LEDGER="$FIX/ledger"
 unset GH_TOKEN GITHUB_TOKEN GH_HOST GIT_DIR GIT_WORK_TREE BASH_ENV ENV MOCK_TOOL || true
@@ -95,7 +103,7 @@ inventories() {
   route gh "$(reply '[[]]')" api 'repos/example/widgets/notifications?all=false&per_page=100' --paginate --slurp
 }
 cli() {
-  RC=0; OUT="$(bash "$ROOT/gh-sweep" "$@" </dev/null 2>&1)" || RC=$?
+  RC=0; OUT="$("$ENTRYPOINT" "$@" </dev/null 2>&1)" || RC=$?
   check "exact boundary: $*" ledger 'all(.[]; .known)'
   check "Git hooks/fsmonitor disabled: $*" ledger 'all(.[] | select(.tool == "git"); .safe_git)'
 }
@@ -337,7 +345,24 @@ route gh "$(reply topic)" repo view --json defaultBranchRef --jq .defaultBranchR
 cli branches --user alice --all --auto
 expect_candidates 'nonstandard default branch protected' '[]'
 check 'nonstandard default branch zero effects' no_effects
-for origin in https://github.com/example/other.git /tmp/unverifiable; do
+# gh itself reads the extension's origin when dispatching; allow only that read.
+reset; inventories
+route git "$(reply https://github.com/sarcasticbird/gh-sweep.git)" -C "${ENTRYPOINT%/*}" config remote.origin.url
+OUT="$("$GH_CLI" sweep branches --dry-run </dev/null 2>&1)" || RC=$?
+check 'real gh dispatches packaged branch planner' eq "$RC" 0
+expect_candidates 'real gh extension branch preview' '[["local","topic"],["local","other"],["remote","topic"]]'
+check 'real gh extension preview no effects or unknown calls' no_effects
+# Origin identity stays case-insensitive for every accepted URL form.
+for origin in https://github.com/ExAmPlE/WiDgEtS.git git@github.com:EXAMPLE/widgets.git ssh://git@github.com/example/WIDGETS; do
+  reset; inventories
+  route git "$(reply "$origin")" -C "$FIX/repo" remote get-url origin
+  route git "$(reply "$origin")" -C "$FIX/repo" remote get-url --push --all origin
+  cli branches --dry-run
+  check "mixed-case origin $origin accepted" eq "$RC" 0
+  expect_candidates "mixed-case origin $origin" '[["local","topic"],["local","other"],["remote","topic"]]'
+  check "mixed-case origin $origin no effects" no_effects
+done
+for origin in https://github.com/example/other.git git@github.com:OTHER/widgets.git ssh://git@github.com/example/OTHER /tmp/unverifiable; do
   reset; inventories
   route git "$(reply "$origin")" -C "$FIX/repo" remote get-url origin
   cli branches --auto

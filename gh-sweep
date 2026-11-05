@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Reject legacy macOS Bash before path discovery or loading Bash 4-only code.
+if (( BASH_VERSINFO[0] < 4 )); then
+  # Keep the example PATH literal for the user to run in their own shell.
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    "error: gh-sweep requires Bash 4+; running Bash $BASH_VERSION." \
+    'macOS /bin/bash is 3.2. Install a current Bash explicitly, then run:' \
+    '  env PATH="/absolute/path/to/new-bash/bin:$PATH" gh sweep branches --dry-run' \
+    'Replace the example directory with the directory containing Bash 4+; no shell or PATH files are changed.' >&2
+  if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then exit 1; fi
+  return 1
+fi
+
 VERSION="0.4.0"
 DRY_RUN=false AUTO=false VERBOSE=false ALL=false INCLUDE_FAILED=false
 DEPTH=0 KEEP_RUNS=5 SELECTED_USER="" COMMAND=all PR_NUMBER=""
